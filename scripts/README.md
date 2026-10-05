@@ -41,12 +41,14 @@ still carry the canonical boundary regex).
 | `check-cut-selection-determinism.sh` | Cut-selection code stays declaration-order deterministic.                                                  |
 | `check_python_parity.py`             | Both write paths call the same set of `novomodelo_io` / `novomodelo_sddp::policy::orchestration` writers, and each phase writer calls `write_success_marker` as its last write. |
 | `check_schemas.sh`                   | Exported JSON schemas match the source types (needs the release binary; `--build`).                        |
+| `check-kiro-steering-drift.sh`       | `.kiro/steering/` matches the `.claude/` rule source (runs the generator in `--check` mode).               |
 | `quality-report.sh`                  | Advisory code-quality hotspot report; also runs the comment-bloat advisory.                                |
 | `lib/comment_scan.sh`                | Shared `cfg(test)`-boundary helpers, sourced by the comment gates.                                         |
 | `allow-rationale-allowlist.txt`      | Allowlist consumed by `check-allow-rationale.sh`.                                                          |
 
 ## `gen/` — generators
 
-| Script                     | Purpose                                                                       |
-| -------------------------- | ----------------------------------------------------------------------------- |
-| `inject_wheel_licenses.py` | Bundle license files into built Python wheels (used by `release-python.yml`). |
+| Script                     | Purpose                                                                                                    |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `inject_wheel_licenses.py` | Bundle license files into built Python wheels (used by `release-python.yml`).                              |
+| `sync-kiro-steering.py`    | Project the `.claude/` rule set onto `.kiro/steering/*.md` (translates front-matter); `--check` for CI.    |
