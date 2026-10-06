@@ -50,4 +50,4 @@ still carry the canonical boundary regex).
 | Script                     | Purpose                                                                                                    |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `inject_wheel_licenses.py` | Bundle license files into built Python wheels (used by `release-python.yml`).                              |
-| `sync-kiro-steering.py`    | Project the `.claude/` rule set onto `.kiro/steering/*.md` (translates front-matter); `--check` verifies.  |
+| `sync-kiro-steering.py`    | Project the `.claude/` rule set onto `.kiro/steering/*.md` (translates front-matter). Run after editing rules. |

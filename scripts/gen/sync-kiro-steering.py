@@ -14,19 +14,16 @@ Front-matter translation:
   Claude `paths: [glob, ...]`  ->  Kiro `inclusion: fileMatch` + `fileMatchPattern: '<glob>'`
   (no `paths:` key)            ->  Kiro `inclusion: always`
 
-Run `--check` to verify the committed steering matches the source;
-run with no flag to (re)write the steering files.
+Run it to (re)write the steering files after editing any `.claude/` rule.
 """
 
 from __future__ import annotations
 
 import argparse
-import difflib
-import sys
 from pathlib import Path
 
-# Generated-file banner. Editing a steering file by hand is a drift bug the CI
-# guard catches; the banner tells a human reader where to edit instead.
+# Generated-file banner tells a human reader where to edit instead — the Kiro
+# steering files are generated, so edits belong in the .claude/ source.
 BANNER = (
     "<!-- GENERATED FILE — DO NOT EDIT.\n"
     "     Source of truth: {source}\n"
@@ -143,38 +140,10 @@ def build_outputs(root: Path) -> dict[Path, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument(
-        "--check",
-        action="store_true",
-        help="verify committed steering matches the source; exit 1 on drift",
-    )
     ap.add_argument("--root", type=Path, default=repo_root())
     args = ap.parse_args()
 
     outputs = build_outputs(args.root)
-
-    if args.check:
-        drifted: list[str] = []
-        for path, expected in outputs.items():
-            actual = path.read_text(encoding="utf-8") if path.is_file() else ""
-            if actual != expected:
-                drifted.append(str(path.relative_to(args.root)))
-                diff = difflib.unified_diff(
-                    actual.splitlines(keepends=True),
-                    expected.splitlines(keepends=True),
-                    fromfile=f"committed/{path.name}",
-                    tofile=f"generated/{path.name}",
-                )
-                sys.stderr.writelines(diff)
-        if drifted:
-            sys.stderr.write(
-                "\nKiro steering is out of sync with .claude/ source:\n  "
-                + "\n  ".join(drifted)
-                + "\nRegenerate: python scripts/gen/sync-kiro-steering.py\n"
-            )
-            return 1
-        print("Kiro steering is in sync with .claude/ source.")
-        return 0
 
     steering_dir = args.root / ".kiro" / "steering"
     steering_dir.mkdir(parents=True, exist_ok=True)
