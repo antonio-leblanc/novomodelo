@@ -5,8 +5,7 @@ fileMatchPattern: '{crates/**/tests/**/*.rs,examples/deterministic/**}'
 
 <!-- GENERATED FILE — DO NOT EDIT.
      Source of truth: .claude/rules/testing.md
-     Regenerate: python scripts/gen/sync-kiro-steering.py
-     CI guard: scripts/ci/check-kiro-steering-drift.sh -->
+     Regenerate: python scripts/gen/sync-kiro-steering.py -->
 
 # Novomodelo Testing Rules
 

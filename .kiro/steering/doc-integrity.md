@@ -5,8 +5,7 @@ fileMatchPattern: '{*.md,CONTRIBUTING.md,CHANGELOG.md,.claude/*.md,.claude/rules
 
 <!-- GENERATED FILE — DO NOT EDIT.
      Source of truth: .claude/rules/doc-integrity.md
-     Regenerate: python scripts/gen/sync-kiro-steering.py
-     CI guard: scripts/ci/check-kiro-steering-drift.sh -->
+     Regenerate: python scripts/gen/sync-kiro-steering.py -->
 
 # Novomodelo Prose Documentation Integrity Rules
 

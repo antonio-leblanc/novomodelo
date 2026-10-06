@@ -4,8 +4,7 @@ inclusion: manual
 
 <!-- GENERATED FILE — DO NOT EDIT.
      Source of truth: .claude/architecture-rules.md
-     Regenerate: python scripts/gen/sync-kiro-steering.py
-     CI guard: scripts/ci/check-kiro-steering-drift.sh -->
+     Regenerate: python scripts/gen/sync-kiro-steering.py -->
 
 # Novomodelo Architecture Rules — Hot Path & Context Structs
 

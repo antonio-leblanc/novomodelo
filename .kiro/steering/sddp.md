@@ -5,8 +5,7 @@ fileMatchPattern: 'crates/novomodelo-sddp/**/*.rs'
 
 <!-- GENERATED FILE — DO NOT EDIT.
      Source of truth: .claude/rules/sddp.md
-     Regenerate: python scripts/gen/sync-kiro-steering.py
-     CI guard: scripts/ci/check-kiro-steering-drift.sh -->
+     Regenerate: python scripts/gen/sync-kiro-steering.py -->
 
 # SDDP Numerical & Algorithm Conventions
 

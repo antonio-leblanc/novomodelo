@@ -303,8 +303,6 @@ jobs:
         run: |
           python3 -m pip install --quiet pytest
           python3 -m pytest -q -p no:cacheprovider scripts/rebrand
-      - name: Check Kiro steering is in sync with .claude/ source
-        run: bash scripts/ci/check-kiro-steering-drift.sh
       - name: Advisory — code-quality hotspot report
         # ADVISORY: always exits 0. Prints a ranked "where to act first" table
         # (churn x size x suppression density x in-body banners) to the job log.

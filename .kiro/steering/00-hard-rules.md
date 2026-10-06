@@ -4,8 +4,7 @@ inclusion: always
 
 <!-- GENERATED FILE — DO NOT EDIT.
      Source of truth: CLAUDE.md
-     Regenerate: python scripts/gen/sync-kiro-steering.py
-     CI guard: scripts/ci/check-kiro-steering-drift.sh -->
+     Regenerate: python scripts/gen/sync-kiro-steering.py -->
 
 # Novomodelo — Development Guidelines
 
@@ -127,7 +126,7 @@ CI's `schemas` job diffs `schemas/` against the live export and fails on drift:
 
 When editing any rule here or under `.claude/rules/`, regenerate the Kiro
 steering mirror — `.claude/` is the single source of truth and `.kiro/steering/`
-is generated from it; CI's `check-kiro-steering-drift.sh` gate fails on drift:
+is generated from it:
 → `python scripts/gen/sync-kiro-steering.py` (never hand-edit `.kiro/steering/`)
 
 ---

@@ -14,7 +14,7 @@ Front-matter translation:
   Claude `paths: [glob, ...]`  ->  Kiro `inclusion: fileMatch` + `fileMatchPattern: '<glob>'`
   (no `paths:` key)            ->  Kiro `inclusion: always`
 
-Run `--check` to verify the committed steering matches the source (CI guard);
+Run `--check` to verify the committed steering matches the source;
 run with no flag to (re)write the steering files.
 """
 
@@ -30,8 +30,7 @@ from pathlib import Path
 BANNER = (
     "<!-- GENERATED FILE — DO NOT EDIT.\n"
     "     Source of truth: {source}\n"
-    "     Regenerate: python scripts/gen/sync-kiro-steering.py\n"
-    "     CI guard: scripts/ci/check-kiro-steering-drift.sh -->\n"
+    "     Regenerate: python scripts/gen/sync-kiro-steering.py -->\n"
 )
 
 # Explicit source -> (steering filename, forced inclusion) overrides. Rule files
