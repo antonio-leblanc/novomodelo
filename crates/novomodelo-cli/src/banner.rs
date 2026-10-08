@@ -26,14 +26,14 @@ pub(crate) fn render_banner_string(use_color: bool) -> String {
     }
 }
 
-/// Write the three-line Novomodelo banner followed by an empty line to `stderr`.
-pub fn print_banner(stderr: &Term) {
+/// Write the three-line Novomodelo banner followed by an empty line to `out`.
+pub fn print_banner(out: &Term) {
     let use_color = console::colors_enabled_stderr();
     let banner = render_banner_string(use_color);
     for line in banner.lines() {
-        let _ = stderr.write_line(line);
+        let _ = out.write_line(line);
     }
-    let _ = stderr.write_line("");
+    let _ = out.write_line("");
 }
 
 #[cfg(test)]

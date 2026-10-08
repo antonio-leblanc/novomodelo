@@ -229,7 +229,7 @@ pub(super) fn run_training_phase(
         serial_scheduling_seconds: Some(global_stats.serial_scheduling_ms as f64 / 1000.0),
     };
     if !ctx.quiet && ctx.is_root {
-        print_training_summary(&ctx.stderr, &training_summary);
+        print_training_summary(&ctx.stdout, &training_summary);
     }
 
     // Assign only this field; `final_upper_bound_std` is populated upstream and

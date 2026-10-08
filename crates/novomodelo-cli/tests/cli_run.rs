@@ -207,6 +207,26 @@ fn test_run_quiet_suppresses_banner_and_summary() {
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains("NOVOMODELO v").not())
+        .stdout(predicate::str::contains("Training complete in").not());
+}
+
+#[test]
+fn informational_output_goes_to_stdout_not_stderr() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(dir.path(), None, None, None, None);
+    let out = TempDir::new().unwrap();
+    novomodelo()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NOVOMODELO v"))
+        .stdout(predicate::str::contains("Training complete in"))
         .stderr(predicate::str::contains("NOVOMODELO v").not())
         .stderr(predicate::str::contains("Training complete in").not());
 }
@@ -1196,7 +1216,7 @@ fn run_produces_deterministic_end_block_and_metadata() {
     let out = TempDir::new().unwrap();
     let out_path = out.path();
 
-    let (_, run_stderr) = run_ok(&[
+    let (run_stdout, _) = run_ok(&[
         "run",
         case.to_str().unwrap(),
         "--output",
@@ -1228,14 +1248,14 @@ fn run_produces_deterministic_end_block_and_metadata() {
         "user_stats_white_noise",
     ] {
         assert!(
-            run_stderr.contains(needle),
-            "live run stderr must contain {needle:?}"
+            run_stdout.contains(needle),
+            "live run stdout must contain {needle:?}"
         );
     }
 
-    let forward_line = find_line(&run_stderr, "Forward");
-    let backward_line = find_line(&run_stderr, "Backward");
-    let serial_line = find_line(&run_stderr, "Serial");
+    let forward_line = find_line(&run_stdout, "Forward");
+    let backward_line = find_line(&run_stdout, "Backward");
+    let serial_line = find_line(&run_stdout, "Serial");
 
     for (label, line) in [
         ("Forward", forward_line),
@@ -1255,8 +1275,8 @@ fn run_produces_deterministic_end_block_and_metadata() {
         backward_line.contains("solve") && backward_line.contains("wait"),
         "Backward line must show the solve/wait decomposition, got: {backward_line:?}"
     );
-    assert_ordered(&run_stderr, "Forward", "Backward");
-    assert_ordered(&run_stderr, "Backward", "Serial");
+    assert_ordered(&run_stdout, "Forward", "Backward");
+    assert_ordered(&run_stdout, "Backward", "Serial");
 
     let sim_metadata_content =
         std::fs::read_to_string(out_path.join("simulation/metadata.json")).unwrap();

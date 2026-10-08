@@ -103,6 +103,10 @@ pub(super) struct RunContext<C: Communicator> {
     /// Input root every path resolves against, never the output directory.
     pub(super) case_dir: PathBuf,
     pub(super) term_width: u16,
+    /// Split from `stderr` so a SLURM `--output`/`--error` run does not file
+    /// informational lines as errors.
+    pub(super) stdout: Term,
+    /// Warnings and `CliError` reporting.
     pub(super) stderr: Term,
     /// Progress strategy: non-TTY stderr gets append-only lines, not bars.
     pub(super) render_mode: RenderMode,
@@ -217,7 +221,7 @@ fn execute_inner<C: Communicator>(
         RunPhasePlan::Nothing => {
             if ctx.is_root && !ctx.quiet {
                 let _ = ctx
-                    .stderr
+                    .stdout
                     .write_line("Training disabled, simulation disabled — nothing to do.");
             }
             Ok(RunOutcome::Completed)
@@ -281,7 +285,7 @@ fn train_then_simulate<C: Communicator>(
                     training_result: &training.result,
                     output_ctx: &training_ctx,
                     quiet: ctx.quiet,
-                    stderr: &ctx.stderr,
+                    out: &ctx.stdout,
                 })
             })
     } else {
