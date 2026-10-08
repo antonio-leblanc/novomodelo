@@ -321,7 +321,7 @@ impl BarRenderer {
                 let gap_pct = gap * 100.0;
                 bar.set_position(iteration);
                 bar.set_message(format!(
-                    "LB: {}  UB: {}  gap: {gap_pct:.1}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms",
+                    "LB: {}  UB: {}  gap: {gap_pct:.5}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms",
                     fmt_sci(lower_bound),
                     fmt_sci(upper_bound)
                 ));
@@ -469,7 +469,7 @@ impl LineRenderer {
                     eta_millis(wall_time_ms, iteration, self.max_iterations),
                 );
                 let _ = self.stderr.write_line(&format!(
-                    "Training   {iteration}/{max} iter  LB: {lb}  UB: {ub}  gap: {gap_pct:.1}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms  {time_cell}",
+                    "Training   {iteration}/{max} iter  LB: {lb}  UB: {ub}  gap: {gap_pct:.5}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms  {time_cell}",
                     max = self.max_iterations,
                     lb = fmt_sci(lower_bound),
                     ub = fmt_sci(upper_bound),

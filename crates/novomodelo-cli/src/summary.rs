@@ -707,11 +707,11 @@ fn training_summary_lines(t: &TrainingSummary) -> Vec<String> {
     ));
     if let Some(initial) = t.initial_gap_percent {
         lines.push(format!(
-            "  Gap:          {:.1}% (started at {:.1}%)",
+            "  Gap:          {:.5}% (started at {:.5}%)",
             t.gap_percent, initial
         ));
     } else {
-        lines.push(format!("  Gap:          {:.1}%", t.gap_percent));
+        lines.push(format!("  Gap:          {:.5}%", t.gap_percent));
     }
     lines.extend(policy_rows_lines(t));
     lines.push(format!(
