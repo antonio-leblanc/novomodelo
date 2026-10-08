@@ -114,18 +114,13 @@ pub(super) fn run_training_phase(
     };
     let mut training_output = setup.build_training_output(&training_result, &events);
 
-    let local_lp_solves: u64 = training_output
+    // Already global: run_iteration allreduce(Sum)s each iteration's lp_solves
+    // before storing it, so a second allreduce here would multiply by world_size.
+    let global_lp_solves: u64 = training_output
         .convergence_records
         .iter()
         .map(|r| u64::from(r.lp_solves))
         .sum();
-    let mut global_lp_solves = [0u64];
-    ctx.comm
-        .allreduce(&[local_lp_solves], &mut global_lp_solves, ReduceOp::Sum)
-        .map_err(|e| CliError::Internal {
-            message: format!("LP solve count allreduce error: {e}"),
-        })?;
-    let global_lp_solves = global_lp_solves[0];
 
     ctx.comm.barrier().map_err(|e| CliError::Internal {
         message: format!("post-training barrier error: {e}"),
