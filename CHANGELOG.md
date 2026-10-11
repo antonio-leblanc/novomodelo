@@ -15,6 +15,13 @@ Cobre's.
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING:** `novomodelo_stochastic::solve_par_noise_batch` and its deprecated alias
+  `solve_par_noises`. Call `solve_par_noise` per series with
+  `PrecomputedPar::deterministic_base`, `psi_slice` and `sigma` instead;
+  `evaluate_par_batch` is unchanged.
+
 ## [0.18.0] - 2026-10-07
 
 ### Changed
