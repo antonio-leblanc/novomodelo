@@ -758,8 +758,8 @@ fn run_patches_the_load_row_and_the_z_row_from_the_raw_noise() {
 
 /// `StageSolvePrep::run` patches the inflow-slack bounds after the other patches
 /// only under the truncation methods: PAR(0) with mean 100 and std 30 at η = -5
-/// gives `r = -50`, so `TruncationWithPenalty`'s cap is 50 while `Truncation` (still on the η clamp)
-/// stays `[0, 0]`; `Penalty` gets no slack patch.
+/// gives `r = -50`, so `TruncationWithPenalty`'s cap is 50 and `Truncation` fixes
+/// the slack at `[50, 50]`; `Penalty` gets no slack patch.
 #[test]
 fn run_patches_the_inflow_slack_bounds_only_under_the_truncation_methods() {
     let state = state_layout(1, 0);
@@ -786,7 +786,7 @@ fn run_patches_the_inflow_slack_bounds_only_under_the_truncation_methods() {
         (
             InflowNonNegativityMethod::Truncation,
             2,
-            Some((vec![4], vec![0.0], vec![0.0])),
+            Some((vec![4], vec![50.0], vec![50.0])),
         ),
         (InflowNonNegativityMethod::Penalty, 1, None),
     ] {

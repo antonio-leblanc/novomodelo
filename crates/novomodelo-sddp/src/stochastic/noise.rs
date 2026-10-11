@@ -7,7 +7,7 @@ use novomodelo_core::commissioning::commissioning_active;
 use novomodelo_core::temporal::StageLagTransition;
 use novomodelo_solver::SolverInterface;
 use novomodelo_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
-use novomodelo_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
+use novomodelo_stochastic::{StochasticContext, evaluate_par_batch};
 
 use crate::indexer::{BlockIdx, HydroSys, NcsSys, StateSpace};
 use crate::lp::builder::StageGeometry;
@@ -15,42 +15,6 @@ use crate::{
     InflowNonNegativityMethod, context::TrainingContext, setup::node_graph::StageIdx,
     workspace::ScratchBuffers,
 };
-
-/// Compute effective (possibly clamped) eta for each hydro.
-///
-/// Under `Truncation`, when any PAR(p) inflow would be negative each negative
-/// hydro's eta is raised to `eta_floor` (the value producing zero inflow);
-/// other methods pass raw eta through.
-pub(crate) fn compute_effective_eta(
-    hydro_noise: &[f64],
-    inflow_method: InflowNonNegativityMethod,
-    par_inflows: &[f64],
-    eta_floor: &[f64],
-    effective_eta: &mut Vec<f64>,
-) {
-    effective_eta.clear();
-    let n_hydros = hydro_noise.len();
-
-    match inflow_method {
-        InflowNonNegativityMethod::Truncation => {
-            let has_negative = par_inflows.iter().take(n_hydros).any(|&a| a < 0.0);
-            for h in 0..n_hydros {
-                let eta = hydro_noise[h];
-                let clamped = if has_negative && par_inflows[h] < 0.0 {
-                    eta.max(eta_floor[h])
-                } else {
-                    eta
-                };
-                effective_eta.push(clamped);
-            }
-        }
-        InflowNonNegativityMethod::None
-        | InflowNonNegativityMethod::Penalty
-        | InflowNonNegativityMethod::TruncationWithPenalty => {
-            effective_eta.extend_from_slice(hydro_noise);
-        }
-    }
-}
 
 /// Returns `true` when `stochastic` carries a PAR model — the shared guard
 /// for the water-balance patch. Its shape is validated once at setup
@@ -60,11 +24,9 @@ pub(crate) fn has_par_model(stochastic: &StochasticContext) -> bool {
     stochastic.par().n_stages() > 0
 }
 
-/// Transform raw inflow noise `η` into the pure z-inflow anchor rate
-/// (`z_inflow_rhs_buf`), applying [`compute_effective_eta`] clamping under
-/// truncation, and, under the truncation methods, the per-hydro physical
-/// inflow-slack bounds (`inflow_slack_{lower,upper}_buf`) from the raw PAR value
-/// at this solve's pinned lags.
+/// Transform raw inflow noise `η` into the z-inflow RHS `b + σ·η` (never clamped)
+/// and, under the truncation methods, the per-hydro physical inflow-slack bounds
+/// from the raw PAR value at this solve's pinned lags.
 // Rationale: clippy::similar_names flags the role-(a) `state` handle (bound from
 // `training_ctx.state`) next to the `stage` index; both are established names, so
 // renaming either to satisfy the heuristic would obscure intent.
@@ -83,79 +45,57 @@ pub(crate) fn transform_inflow_noise(
     let hydro_noise = &raw_noise[dims.hydro_range()];
     let state = training_ctx.state;
 
-    scratch.z_inflow_rhs_buf.clear();
-    scratch.inflow_slack_lower_buf.clear();
-    scratch.inflow_slack_upper_buf.clear();
-
     let par_lp = stochastic.par();
     let has_par = has_par_model(stochastic);
 
-    if inflow_method.truncates() {
-        scratch.par_inflow_buf.clear();
-        scratch.par_inflow_buf.resize(n_hydros, 0.0);
-        if has_par {
-            let max_order = state.max_par_order;
-            scratch.lag_matrix_buf.clear();
-            scratch
-                .lag_matrix_buf
-                .extend_from_slice(&current_state[state.inflow_lags.clone()]);
-            debug_assert_eq!(scratch.lag_matrix_buf.len(), max_order * n_hydros);
-            evaluate_par_batch(
-                par_lp,
-                stage.0,
-                &scratch.lag_matrix_buf,
-                hydro_noise,
-                &mut scratch.par_inflow_buf,
-            );
-        }
-    }
-
-    if *inflow_method == InflowNonNegativityMethod::Truncation && has_par {
-        let has_negative = scratch.par_inflow_buf.iter().any(|&a| a < 0.0);
-        if has_negative {
-            scratch.eta_floor_buf.clear();
-            scratch.eta_floor_buf.resize(n_hydros, f64::NEG_INFINITY);
-            let zero_targets = &scratch.zero_targets_buf[..n_hydros];
-            solve_par_noise_batch(
-                par_lp,
-                stage.0,
-                &scratch.lag_matrix_buf,
-                zero_targets,
-                &mut scratch.eta_floor_buf,
-            );
-        }
-    }
-
-    compute_effective_eta(
-        hydro_noise,
-        *inflow_method,
-        &scratch.par_inflow_buf,
-        &scratch.eta_floor_buf,
-        &mut scratch.effective_eta_buf,
-    );
-
-    for (h, &eta_eff) in scratch.effective_eta_buf.iter().enumerate() {
+    scratch.z_inflow_rhs_buf.clear();
+    for (h, &eta) in hydro_noise.iter().enumerate() {
         // Z-inflow RHS in m3/s: no zeta, no withdrawal.
         if has_par {
             let base = par_lp.deterministic_base(stage.0, h);
             let sigma = par_lp.sigma(stage.0, h);
-            scratch.z_inflow_rhs_buf.push(base + sigma * eta_eff);
+            scratch.z_inflow_rhs_buf.push(base + sigma * eta);
         } else {
             scratch.z_inflow_rhs_buf.push(0.0);
         }
     }
 
-    if inflow_method.truncates() {
-        let caps_the_correction =
-            *inflow_method == InflowNonNegativityMethod::TruncationWithPenalty;
-        for &r in &scratch.par_inflow_buf {
-            // An explicit branch writes +0.0, never the -0.0 `(-r).max(0.0)` can return.
-            let correction = if r < 0.0 { -r } else { 0.0 };
-            scratch.inflow_slack_lower_buf.push(0.0);
-            scratch
-                .inflow_slack_upper_buf
-                .push(if caps_the_correction { correction } else { 0.0 });
-        }
+    scratch.inflow_slack_lower_buf.clear();
+    scratch.inflow_slack_upper_buf.clear();
+    if !inflow_method.truncates() {
+        return;
+    }
+
+    scratch.par_inflow_buf.clear();
+    scratch.par_inflow_buf.resize(n_hydros, 0.0);
+    if has_par {
+        let max_order = state.max_par_order;
+        scratch.lag_matrix_buf.clear();
+        scratch
+            .lag_matrix_buf
+            .extend_from_slice(&current_state[state.inflow_lags.clone()]);
+        debug_assert_eq!(scratch.lag_matrix_buf.len(), max_order * n_hydros);
+        evaluate_par_batch(
+            par_lp,
+            stage.0,
+            &scratch.lag_matrix_buf,
+            hydro_noise,
+            &mut scratch.par_inflow_buf,
+        );
+    }
+
+    let fixes_the_correction = *inflow_method == InflowNonNegativityMethod::Truncation;
+    for &r in &scratch.par_inflow_buf {
+        // An explicit branch writes +0.0, never the -0.0 `(-r).max(0.0)` can return.
+        let truncation_amount = if r < 0.0 { -r } else { 0.0 };
+        scratch
+            .inflow_slack_lower_buf
+            .push(if fixes_the_correction {
+                truncation_amount
+            } else {
+                0.0
+            });
+        scratch.inflow_slack_upper_buf.push(truncation_amount);
     }
 }
 
@@ -596,8 +536,8 @@ mod tests {
         lp::builder::StageGeometry,
         noise::{
             apply_inflow_slack_col_bounds, apply_ncs_col_bounds, build_dense_ncs_col_indices,
-            compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
-            transform_inflow_noise, transform_load_noise, transform_ncs_noise,
+            gather_dense_ncs_bounds, shift_lag_state, transform_inflow_noise, transform_load_noise,
+            transform_ncs_noise,
         },
         setup::node_graph::StageIdx,
         test_support,
@@ -1008,12 +948,10 @@ mod tests {
 
     // ── transform_inflow_noise: Truncation ───────────────────────────────────
 
-    /// Truncation: when the PAR inflow would be negative, eta is clamped.
-    ///
-    /// AR(0) model: inflow = sigma * eta.  With sigma=1.0 and lag=0:
-    /// inflow = 1.0 * eta.  For eta = -5.0, inflow = -5.0 < 0 → clamp.
+    /// Truncation keeps z raw and fixes the slack at the truncation amount: PAR(0)
+    /// with base 0 and σ 1, so `r = η`; η = -5 gives `[5, 5]`.
     #[test]
-    fn test_transform_inflow_noise_truncation_clamps() {
+    fn test_transform_inflow_noise_truncation_writes_the_raw_rhs_and_fixes_the_correction() {
         let stochastic = make_one_hydro_stochastic(1);
         // 1 hydro, 0 PAR lags
         let layout = test_support::state_layout(1, 0);
@@ -1056,14 +994,9 @@ mod tests {
             &mut scratch,
         );
 
-        assert_eq!(scratch.z_inflow_rhs_buf.len(), 1);
-        // z_inflow_rhs = base + sigma * clamped_eta = the realized inflow (m3/s).
-        // After clamping, the realized inflow must be >= 0.
-        assert!(
-            scratch.z_inflow_rhs_buf[0] >= -1e-10,
-            "truncation must yield non-negative realized inflow, got {}",
-            scratch.z_inflow_rhs_buf[0]
-        );
+        assert_eq!(scratch.z_inflow_rhs_buf, vec![-5.0], "the z RHS stays raw");
+        assert_eq!(scratch.inflow_slack_lower_buf, vec![5.0]);
+        assert_eq!(scratch.inflow_slack_upper_buf, vec![5.0]);
     }
 
     /// TwP keeps z raw and caps the slack at the truncation amount: PAR(0) with
@@ -1129,7 +1062,8 @@ mod tests {
         }
     }
 
-    /// Truncation passthrough: positive-inflow eta passes through unchanged.
+    /// Truncation with `r >= 0` (η = 3 and η = 0): the z RHS is raw and the slack
+    /// is pinned at `[+0.0, +0.0]`.
     #[test]
     fn test_transform_inflow_noise_truncation_passthrough() {
         let stochastic = make_one_hydro_stochastic(1);
@@ -1137,8 +1071,6 @@ mod tests {
         let state = test_support::state_layout(1, 0);
         let current_state = vec![0.0; layout.n_state];
 
-        // eta = 3.0 → inflow = 1.0 * 3.0 = 3.0 > 0 → no clamping.
-        let raw_noise = vec![3.0_f64];
         let inflow_method = InflowNonNegativityMethod::Truncation;
         let horizon = HorizonMode::Finite { num_stages: 1 };
         let study_dims = test_support::study_dims();
@@ -1163,23 +1095,31 @@ mod tests {
             lag_weight_seed: &[],
             dcs: None,
         };
-        let mut scratch = ScratchBuffers::for_test(1);
-
-        transform_inflow_noise(
-            &raw_noise,
-            StageIdx(0),
-            &current_state,
-            &training_ctx,
-            &mut scratch,
-        );
-
-        assert_eq!(scratch.z_inflow_rhs_buf.len(), 1);
-        // Expected z_inflow_rhs: 0.0 + 1.0 * 3.0 = 3.0 (no clamping).
-        assert!(
-            (scratch.z_inflow_rhs_buf[0] - 3.0).abs() < 1e-12,
-            "expected 3.0, got {}",
-            scratch.z_inflow_rhs_buf[0]
-        );
+        for eta in [3.0_f64, 0.0] {
+            let mut scratch = ScratchBuffers::for_test(1);
+            transform_inflow_noise(
+                &[eta],
+                StageIdx(0),
+                &current_state,
+                &training_ctx,
+                &mut scratch,
+            );
+            assert_eq!(scratch.z_inflow_rhs_buf.len(), 1);
+            // Expected z_inflow_rhs: 0.0 + 1.0 * eta.
+            assert!(
+                (scratch.z_inflow_rhs_buf[0] - eta).abs() < 1e-12,
+                "expected {eta}, got {}",
+                scratch.z_inflow_rhs_buf[0]
+            );
+            assert_eq!(
+                (
+                    scratch.inflow_slack_lower_buf[0].to_bits(),
+                    scratch.inflow_slack_upper_buf[0].to_bits()
+                ),
+                (0.0_f64.to_bits(), 0.0_f64.to_bits()),
+                "eta {eta}: r >= 0 pins the slack at [+0.0, +0.0]"
+            );
+        }
     }
 
     // ── transform_load_noise ──────────────────────────────────────────────────
@@ -1312,92 +1252,6 @@ mod tests {
         shift_lag_state(&mut state, &incoming_lags, &primal, &layout);
         assert_eq!(state[0], 100.0, "storage[0] must be preserved");
         assert_eq!(state[1], 200.0, "storage[1] must be preserved");
-    }
-
-    // ── compute_effective_eta tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_compute_effective_eta_none_passes_through() {
-        let raw_noise = [0.5, -1.0];
-        let par_inflows = []; // unused for None
-        let eta_floor = []; // unused for None
-        let mut effective = Vec::new();
-        compute_effective_eta(
-            &raw_noise,
-            InflowNonNegativityMethod::None,
-            &par_inflows,
-            &eta_floor,
-            &mut effective,
-        );
-        assert_eq!(effective, vec![0.5, -1.0]);
-    }
-
-    #[test]
-    fn test_compute_effective_eta_penalty_passes_through() {
-        let raw_noise = [0.5, -1.0];
-        let par_inflows = [];
-        let eta_floor = [];
-        let mut effective = Vec::new();
-        compute_effective_eta(
-            &raw_noise,
-            InflowNonNegativityMethod::Penalty,
-            &par_inflows,
-            &eta_floor,
-            &mut effective,
-        );
-        assert_eq!(effective, vec![0.5, -1.0]);
-    }
-
-    #[test]
-    fn test_compute_effective_eta_truncation_clamps_negative() {
-        // 2 hydros: par_inflows[0] < 0 -> clamp eta[0]; par_inflows[1] > 0 -> pass through.
-        let raw_noise = [-2.0, 1.0];
-        let par_inflows = [-5.0, 3.0];
-        let eta_floor = [-1.0, -0.5]; // floor for hydro 0 is -1.0
-        let mut effective = Vec::new();
-        compute_effective_eta(
-            &raw_noise,
-            InflowNonNegativityMethod::Truncation,
-            &par_inflows,
-            &eta_floor,
-            &mut effective,
-        );
-        // hydro 0: eta=-2.0, floor=-1.0 -> max(-2, -1) = -1.0
-        // hydro 1: par_inflows[1]=3.0 >= 0 -> no clamp -> eta=1.0
-        assert_eq!(effective, vec![-1.0, 1.0]);
-    }
-
-    #[test]
-    fn test_compute_effective_eta_truncation_passes_positive() {
-        // All PAR inflows positive -> no clamping at all.
-        let raw_noise = [-2.0, 1.0];
-        let par_inflows = [3.0, 5.0];
-        let eta_floor = [-1.0, -0.5]; // floors are irrelevant when no negative inflow
-        let mut effective = Vec::new();
-        compute_effective_eta(
-            &raw_noise,
-            InflowNonNegativityMethod::Truncation,
-            &par_inflows,
-            &eta_floor,
-            &mut effective,
-        );
-        assert_eq!(effective, vec![-2.0, 1.0]);
-    }
-
-    #[test]
-    fn test_compute_effective_eta_truncation_with_penalty_passes_through() {
-        let raw_noise = [-2.0, 1.0];
-        let par_inflows = [-5.0, 3.0];
-        let eta_floor = [-1.0, -0.5];
-        let mut effective = Vec::new();
-        compute_effective_eta(
-            &raw_noise,
-            InflowNonNegativityMethod::TruncationWithPenalty,
-            &par_inflows,
-            &eta_floor,
-            &mut effective,
-        );
-        assert_eq!(effective, vec![-2.0, 1.0]);
     }
 
     // ── accumulate_and_shift_lag_state tests ─────────────────────────────────
