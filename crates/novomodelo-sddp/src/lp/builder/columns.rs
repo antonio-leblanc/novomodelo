@@ -592,8 +592,9 @@ fn fill_deficit_and_excess_columns(
 }
 
 /// Inflow non-negativity slack columns (`sigma_inf_h`), one per hydro: priced at
-/// `inflow_nonnegativity_cost * total_stage_hours` when the method prices them,
-/// otherwise cost 0 and fixed at `[0, 0]` in the template.
+/// `inflow_nonnegativity_cost * total_stage_hours` when the method prices them
+/// (otherwise cost 0); fixed at `[0, 0]` in the template under the truncation
+/// methods, whose bounds are patched per solve.
 fn fill_inflow_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -608,7 +609,8 @@ fn fill_inflow_slack_columns(
             if method.slack_is_priced() {
                 let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
                 bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
-            } else {
+            }
+            if method.truncates() {
                 bufs.col_upper[col] = 0.0;
             }
         }

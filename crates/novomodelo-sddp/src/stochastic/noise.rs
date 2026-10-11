@@ -9,7 +9,7 @@ use novomodelo_solver::SolverInterface;
 use novomodelo_stochastic::par::lag_kernel::{LagMajor, advance_lag_chain};
 use novomodelo_stochastic::{StochasticContext, evaluate_par_batch, solve_par_noise_batch};
 
-use crate::indexer::{BlockIdx, NcsSys, StateSpace};
+use crate::indexer::{BlockIdx, HydroSys, NcsSys, StateSpace};
 use crate::lp::builder::StageGeometry;
 use crate::{
     InflowNonNegativityMethod, context::TrainingContext, setup::node_graph::StageIdx,
@@ -18,7 +18,7 @@ use crate::{
 
 /// Compute effective (possibly clamped) eta for each hydro.
 ///
-/// Under truncation, when any PAR(p) inflow would be negative each negative
+/// Under `Truncation`, when any PAR(p) inflow would be negative each negative
 /// hydro's eta is raised to `eta_floor` (the value producing zero inflow);
 /// other methods pass raw eta through.
 pub(crate) fn compute_effective_eta(
@@ -32,8 +32,7 @@ pub(crate) fn compute_effective_eta(
     let n_hydros = hydro_noise.len();
 
     match inflow_method {
-        InflowNonNegativityMethod::Truncation
-        | InflowNonNegativityMethod::TruncationWithPenalty => {
+        InflowNonNegativityMethod::Truncation => {
             let has_negative = par_inflows.iter().take(n_hydros).any(|&a| a < 0.0);
             for h in 0..n_hydros {
                 let eta = hydro_noise[h];
@@ -45,7 +44,9 @@ pub(crate) fn compute_effective_eta(
                 effective_eta.push(clamped);
             }
         }
-        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {
+        InflowNonNegativityMethod::None
+        | InflowNonNegativityMethod::Penalty
+        | InflowNonNegativityMethod::TruncationWithPenalty => {
             effective_eta.extend_from_slice(hydro_noise);
         }
     }
@@ -61,7 +62,9 @@ pub(crate) fn has_par_model(stochastic: &StochasticContext) -> bool {
 
 /// Transform raw inflow noise `η` into the pure z-inflow anchor rate
 /// (`z_inflow_rhs_buf`), applying [`compute_effective_eta`] clamping under
-/// truncation.
+/// truncation, and, under the truncation methods, the per-hydro physical
+/// inflow-slack bounds (`inflow_slack_{lower,upper}_buf`) from the raw PAR value
+/// at this solve's pinned lags.
 // Rationale: clippy::similar_names flags the role-(a) `state` handle (bound from
 // `training_ctx.state`) next to the `stage` index; both are established names, so
 // renaming either to satisfy the heuristic would obscure intent.
@@ -81,47 +84,46 @@ pub(crate) fn transform_inflow_noise(
     let state = training_ctx.state;
 
     scratch.z_inflow_rhs_buf.clear();
+    scratch.inflow_slack_lower_buf.clear();
+    scratch.inflow_slack_upper_buf.clear();
 
     let par_lp = stochastic.par();
     let has_par = has_par_model(stochastic);
 
-    match inflow_method {
-        InflowNonNegativityMethod::Truncation
-        | InflowNonNegativityMethod::TruncationWithPenalty => {
-            if has_par {
-                let max_order = state.max_par_order;
-                scratch.lag_matrix_buf.clear();
-                scratch
-                    .lag_matrix_buf
-                    .extend_from_slice(&current_state[state.inflow_lags.clone()]);
-                debug_assert_eq!(scratch.lag_matrix_buf.len(), max_order * n_hydros);
-
-                scratch.par_inflow_buf.clear();
-                scratch.par_inflow_buf.resize(n_hydros, 0.0);
-                evaluate_par_batch(
-                    par_lp,
-                    stage.0,
-                    &scratch.lag_matrix_buf,
-                    hydro_noise,
-                    &mut scratch.par_inflow_buf,
-                );
-
-                let has_negative = scratch.par_inflow_buf.iter().any(|&a| a < 0.0);
-                if has_negative {
-                    scratch.eta_floor_buf.clear();
-                    scratch.eta_floor_buf.resize(n_hydros, f64::NEG_INFINITY);
-                    let zero_targets = &scratch.zero_targets_buf[..n_hydros];
-                    solve_par_noise_batch(
-                        par_lp,
-                        stage.0,
-                        &scratch.lag_matrix_buf,
-                        zero_targets,
-                        &mut scratch.eta_floor_buf,
-                    );
-                }
-            }
+    if inflow_method.truncates() {
+        scratch.par_inflow_buf.clear();
+        scratch.par_inflow_buf.resize(n_hydros, 0.0);
+        if has_par {
+            let max_order = state.max_par_order;
+            scratch.lag_matrix_buf.clear();
+            scratch
+                .lag_matrix_buf
+                .extend_from_slice(&current_state[state.inflow_lags.clone()]);
+            debug_assert_eq!(scratch.lag_matrix_buf.len(), max_order * n_hydros);
+            evaluate_par_batch(
+                par_lp,
+                stage.0,
+                &scratch.lag_matrix_buf,
+                hydro_noise,
+                &mut scratch.par_inflow_buf,
+            );
         }
-        InflowNonNegativityMethod::None | InflowNonNegativityMethod::Penalty => {}
+    }
+
+    if *inflow_method == InflowNonNegativityMethod::Truncation && has_par {
+        let has_negative = scratch.par_inflow_buf.iter().any(|&a| a < 0.0);
+        if has_negative {
+            scratch.eta_floor_buf.clear();
+            scratch.eta_floor_buf.resize(n_hydros, f64::NEG_INFINITY);
+            let zero_targets = &scratch.zero_targets_buf[..n_hydros];
+            solve_par_noise_batch(
+                par_lp,
+                stage.0,
+                &scratch.lag_matrix_buf,
+                zero_targets,
+                &mut scratch.eta_floor_buf,
+            );
+        }
     }
 
     compute_effective_eta(
@@ -140,6 +142,19 @@ pub(crate) fn transform_inflow_noise(
             scratch.z_inflow_rhs_buf.push(base + sigma * eta_eff);
         } else {
             scratch.z_inflow_rhs_buf.push(0.0);
+        }
+    }
+
+    if inflow_method.truncates() {
+        let caps_the_correction =
+            *inflow_method == InflowNonNegativityMethod::TruncationWithPenalty;
+        for &r in &scratch.par_inflow_buf {
+            // An explicit branch writes +0.0, never the -0.0 `(-r).max(0.0)` can return.
+            let correction = if r < 0.0 { -r } else { 0.0 };
+            scratch.inflow_slack_lower_buf.push(0.0);
+            scratch
+                .inflow_slack_upper_buf
+                .push(if caps_the_correction { correction } else { 0.0 });
         }
     }
 }
@@ -496,6 +511,48 @@ pub(crate) fn apply_ncs_col_bounds<S: SolverInterface>(
     );
 }
 
+/// Patch this solve's inflow-slack column bounds (physical
+/// `scratch.inflow_slack_{lower,upper}_buf`, written by [`transform_inflow_noise`])
+/// in one `set_col_bounds`. Bounds are divided by `col_scale[col]` (empty =
+/// identity), never written unscaled as [`apply_ncs_col_bounds`] does: the slack's
+/// water-row entries are `−ζ`/`−τ_k`, so its column scale is not 1.
+pub(crate) fn apply_inflow_slack_col_bounds<S: SolverInterface>(
+    solver: &mut S,
+    scratch: &mut ScratchBuffers,
+    geometry: &StageGeometry,
+    col_scale: &[f64],
+) {
+    debug_assert!(scratch.inflow_slack_lower_buf.len() >= geometry.inflow_slack.len());
+    debug_assert!(scratch.inflow_slack_upper_buf.len() >= geometry.inflow_slack.len());
+    if scratch.last_inflow_slack_col_start != geometry.inflow_slack.start {
+        scratch.inflow_slack_col_indices_buf.clear();
+        scratch.inflow_slack_col_indices_buf.extend(
+            (0..geometry.inflow_slack.len()).map(|h| geometry.inflow_slack_col(HydroSys::new(h))),
+        );
+        scratch.last_inflow_slack_col_start = geometry.inflow_slack.start;
+    }
+    scratch.inflow_slack_col_lower_scaled_buf.clear();
+    scratch.inflow_slack_col_upper_scaled_buf.clear();
+    for (i, &col) in scratch.inflow_slack_col_indices_buf.iter().enumerate() {
+        let d = if col_scale.is_empty() {
+            1.0
+        } else {
+            col_scale[col]
+        };
+        scratch
+            .inflow_slack_col_lower_scaled_buf
+            .push(scratch.inflow_slack_lower_buf[i] / d);
+        scratch
+            .inflow_slack_col_upper_scaled_buf
+            .push(scratch.inflow_slack_upper_buf[i] / d);
+    }
+    solver.set_col_bounds(
+        &scratch.inflow_slack_col_indices_buf,
+        &scratch.inflow_slack_col_lower_scaled_buf,
+        &scratch.inflow_slack_col_upper_scaled_buf,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -538,9 +595,9 @@ mod tests {
         inflow_method::InflowNonNegativityMethod,
         lp::builder::StageGeometry,
         noise::{
-            apply_ncs_col_bounds, build_dense_ncs_col_indices, compute_effective_eta,
-            gather_dense_ncs_bounds, shift_lag_state, transform_inflow_noise, transform_load_noise,
-            transform_ncs_noise,
+            apply_inflow_slack_col_bounds, apply_ncs_col_bounds, build_dense_ncs_col_indices,
+            compute_effective_eta, gather_dense_ncs_bounds, shift_lag_state,
+            transform_inflow_noise, transform_load_noise, transform_ncs_noise,
         },
         setup::node_graph::StageIdx,
         test_support,
@@ -1009,6 +1066,69 @@ mod tests {
         );
     }
 
+    /// TwP keeps z raw and caps the slack at the truncation amount: PAR(0) with
+    /// base 0 and σ 1, so `r = η`.
+    #[test]
+    fn test_transform_inflow_noise_truncation_with_penalty_caps_the_correction() {
+        let stochastic = make_one_hydro_stochastic(1);
+        let state = test_support::state_layout(1, 0);
+        let current_state = vec![0.0; state.n_state];
+        let inflow_method = InflowNonNegativityMethod::TruncationWithPenalty;
+        let horizon = HorizonMode::Finite { num_stages: 1 };
+        let study_dims = test_support::study_dims();
+        let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &[],
+            study_dims: &study_dims,
+            inflow_method: &inflow_method,
+            stochastic: &stochastic,
+            initial_state: &current_state,
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+        for (eta, z_rhs, upper) in [(-5.0_f64, -5.0_f64, 5.0_f64), (3.0, 3.0, 0.0)] {
+            let mut scratch = ScratchBuffers::for_test(1);
+            transform_inflow_noise(
+                &[eta],
+                StageIdx(0),
+                &current_state,
+                &training_ctx,
+                &mut scratch,
+            );
+            assert_eq!(
+                scratch.z_inflow_rhs_buf,
+                vec![z_rhs],
+                "eta {eta}: raw z RHS"
+            );
+            assert_eq!(
+                scratch.inflow_slack_lower_buf,
+                vec![0.0],
+                "eta {eta}: lower"
+            );
+            assert_eq!(
+                scratch.inflow_slack_upper_buf,
+                vec![upper],
+                "eta {eta}: upper"
+            );
+            assert_eq!(
+                scratch.inflow_slack_upper_buf[0].to_bits(),
+                upper.to_bits(),
+                "eta {eta}: the cap is +0.0, never -0.0"
+            );
+        }
+    }
+
     /// Truncation passthrough: positive-inflow eta passes through unchanged.
     #[test]
     fn test_transform_inflow_noise_truncation_passthrough() {
@@ -1265,8 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_effective_eta_truncation_with_penalty_clamps() {
-        // TruncationWithPenalty behaves the same as Truncation for clamping.
+    fn test_compute_effective_eta_truncation_with_penalty_passes_through() {
         let raw_noise = [-2.0, 1.0];
         let par_inflows = [-5.0, 3.0];
         let eta_floor = [-1.0, -0.5];
@@ -1278,7 +1397,7 @@ mod tests {
             &eta_floor,
             &mut effective,
         );
-        assert_eq!(effective, vec![-1.0, 1.0]);
+        assert_eq!(effective, vec![-2.0, 1.0]);
     }
 
     // ── accumulate_and_shift_lag_state tests ─────────────────────────────────
@@ -2313,6 +2432,70 @@ mod tests {
             &mut last_ncs_col_start
         ));
         assert_eq!(indices_buf, vec![200, 201, 202, 203]);
+    }
+
+    // ── apply_inflow_slack_col_bounds ───────────────────────────────────────
+
+    fn slack_geometry(start: usize) -> StageGeometry {
+        StageGeometry {
+            inflow_slack: start..start + 2,
+            ..test_support::equipment_free_geometry(&[1]).remove(0)
+        }
+    }
+
+    /// The patch writes `physical / col_scale[col]` (the state-pin convention),
+    /// never the physical value as the NCS patch does; an empty `col_scale` is the
+    /// identity.
+    #[test]
+    fn truncation_slack_bound_is_divided_by_col_scale() {
+        let geometry = slack_geometry(10);
+        let mut col_scale = vec![1.0_f64; 12];
+        col_scale[10] = 0.25;
+        col_scale[11] = 4.0;
+        for (scale, expected_lower, expected_upper) in [
+            (col_scale.as_slice(), [12.0_f64, 0.0], [12.0_f64, 2.0]),
+            (&[][..], [3.0, 0.0], [3.0, 8.0]),
+        ] {
+            let mut scratch = ScratchBuffers::for_test(2);
+            scratch.inflow_slack_lower_buf = vec![3.0, 0.0];
+            scratch.inflow_slack_upper_buf = vec![3.0, 8.0];
+            let mut solver = RecordingSolver::default();
+            apply_inflow_slack_col_bounds(&mut solver, &mut scratch, &geometry, scale);
+            assert_eq!(
+                solver.col_bounds_calls.len(),
+                1,
+                "one set_col_bounds per solve"
+            );
+            let (indices, lower, upper) = &solver.col_bounds_calls[0];
+            assert_eq!(indices, &vec![10_usize, 11]);
+            let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                bits(lower),
+                bits(&expected_lower),
+                "lower, col_scale {scale:?}"
+            );
+            assert_eq!(
+                bits(upper),
+                bits(&expected_upper),
+                "upper, col_scale {scale:?}"
+            );
+        }
+    }
+
+    /// The index rebuild keys on `geometry.inflow_slack.start`: two stages with the
+    /// same slack length (always `hydro_count`) but different starts each get their
+    /// own columns. A length-only guard would never fire.
+    #[test]
+    fn inflow_slack_index_buffer_rebuilds_on_start_change_at_equal_length() {
+        let mut scratch = ScratchBuffers::for_test(2);
+        scratch.inflow_slack_lower_buf = vec![0.0, 0.0];
+        scratch.inflow_slack_upper_buf = vec![1.0, 2.0];
+        let mut solver = RecordingSolver::default();
+        apply_inflow_slack_col_bounds(&mut solver, &mut scratch, &slack_geometry(10), &[]);
+        apply_inflow_slack_col_bounds(&mut solver, &mut scratch, &slack_geometry(20), &[]);
+        assert_eq!(solver.col_bounds_calls[0].0, vec![10_usize, 11]);
+        assert_eq!(solver.col_bounds_calls[1].0, vec![20_usize, 21]);
+        assert_eq!(scratch.last_inflow_slack_col_start, 20);
     }
 
     // ── apply_ncs_col_bounds: collapsed-function equivalence ────────────────

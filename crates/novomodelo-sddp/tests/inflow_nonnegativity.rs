@@ -716,7 +716,7 @@ fn test_simulation_slack_output_populated() {
     );
 }
 
-/// `TruncationWithPenalty` (clamping + penalty slack) trains end-to-end and the
+/// `TruncationWithPenalty` (raw PAR value, capped and priced slack) trains end-to-end and the
 /// LP template carries inflow slack columns.
 #[test]
 fn truncation_with_penalty_training_completes() {
@@ -872,8 +872,9 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
 }
 
 /// Per method, the inflow-slack family's objective and template bounds: absent under
-/// `None`; priced at `c_h * hours` with `[0, +inf)` under `Penalty` and
-/// `TruncationWithPenalty`; cost 0 and fixed at `[0, 0]` under `Truncation`.
+/// `None`; priced at `c_h * hours` under `Penalty` and `TruncationWithPenalty`, cost 0
+/// under `Truncation`; bounds `[0, +inf)` under `Penalty`, and `[0, 0]` under the
+/// truncation methods, which patch them per solve.
 #[test]
 fn inflow_slack_objective_and_template_bounds_follow_the_method() {
     let system = per_plant_penalty_system();
@@ -903,19 +904,23 @@ fn inflow_slack_objective_and_template_bounds_follow_the_method() {
             );
             if method == InflowNonNegativityMethod::Truncation {
                 assert_eq!(objective, 0.0, "{method:?} hydro {h} objective");
-                assert_eq!((lower, upper), (0.0, 0.0), "{method:?} hydro {h} bounds");
             } else {
                 let expected = c_h * block_hours / cost_scale;
                 assert!(
                     (objective - expected).abs() < 1e-6,
                     "{method:?} hydro {h} objective: expected {expected}, got {objective}"
                 );
-                assert_eq!(
-                    (lower, upper),
-                    (0.0, f64::INFINITY),
-                    "{method:?} hydro {h} bounds"
-                );
             }
+            let expected_upper = if method == InflowNonNegativityMethod::Penalty {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            assert_eq!(
+                (lower, upper),
+                (0.0, expected_upper),
+                "{method:?} hydro {h} bounds"
+            );
         }
     }
 }
