@@ -1455,6 +1455,11 @@ pub struct ChronologicalNoiseSpec {
     pub reverse_declaration_order: bool,
     /// Withdrawal \[m³/s\] on hydro id 1's stage-0 water-balance row only.
     pub water_withdrawal_m3s: f64,
+    /// The study's inflow non-negativity method.
+    pub inflow_method: CfgInflowMethod,
+    /// PAR(0) inflow mean \[m³/s\], shared by both hydros; a negative mean gives
+    /// negative draws.
+    pub inflow_mean_m3s: f64,
 }
 
 impl Default for ChronologicalNoiseSpec {
@@ -1466,6 +1471,8 @@ impl Default for ChronologicalNoiseSpec {
             pumping_station: false,
             reverse_declaration_order: false,
             water_withdrawal_m3s: 0.0,
+            inflow_method: CfgInflowMethod::None,
+            inflow_mean_m3s: CHRONOLOGICAL_NOISE_INFLOW_MEAN_M3S,
         }
     }
 }
@@ -1562,7 +1569,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
             (0..CHRONOLOGICAL_NOISE_N_STAGES).map(move |i| InflowModel {
                 hydro_id: EntityId(id),
                 stage_id: i32::try_from(i).expect("stage index fits i32"),
-                mean_m3s: CHRONOLOGICAL_NOISE_INFLOW_MEAN_M3S,
+                mean_m3s: spec.inflow_mean_m3s,
                 std_m3s: CHRONOLOGICAL_NOISE_INFLOW_STD_M3S[h],
                 ar_coefficients: vec![],
                 residual_std_ratio: 1.0,
@@ -1722,7 +1729,9 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
 pub fn chronological_noise_study(
     spec: &ChronologicalNoiseSpec,
 ) -> (novomodelo_core::System, Config) {
-    (build_chronological_noise_system(spec), build_config())
+    let mut config = build_config();
+    config.modeling.inflow_non_negativity.method = spec.inflow_method;
+    (build_chronological_noise_system(spec), config)
 }
 
 /// [`chronological_noise_study`] with its pumping station enabled, built
