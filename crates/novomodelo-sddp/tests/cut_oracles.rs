@@ -9,17 +9,28 @@
 
 mod common;
 
+use std::path::Path;
+
 use novomodelo_core::System;
 use novomodelo_io::Config;
+use novomodelo_io::config::InflowNonNegativityMethod as CfgInflowMethod;
 use novomodelo_sddp::StudySetup;
+use novomodelo_sddp::setup::{NodePos, StageIdx};
 use novomodelo_sddp::test_support::decks::committed_decks;
+use novomodelo_sddp::test_support::{
+    inflow_slack_bounds_for_probe, stage_state_box_bounds,
+    write_backward_opening_outcome_with_inflow_slack_bounds_for_probe,
+};
+use novomodelo_solver::ActiveSolver;
 
 use common::cut_oracles::{apply_oracle_config, run_cut_oracles};
 use common::in_code_studies::{
     ChronologicalNoiseSpec, chronological_noise_study, discounted_anticipated_study,
     mixed_lead_anticipated_study, parallel_multiblock_evaporation_study, stochastic_parallel_study,
 };
-use common::{build_setup_in_code, build_setup_in_code_with_models, fresh_setup_with};
+use common::{StubComm, build_setup_in_code, build_setup_in_code_with_models, fresh_setup_with};
+
+const D19_DIR: &str = "../../examples/deterministic/d19-multi-hydro-par";
 
 fn oracle_setup(system: System, mut config: Config) -> StudySetup {
     apply_oracle_config(&mut config);
@@ -140,4 +151,109 @@ fn cut_oracles_hold_on_every_committed_deck_with_lag_or_anticipated_state() {
         any_max_par_order,
         "at least one selected deck must have max_par_order > 0"
     );
+}
+
+/// The out-of-LP slack-bound evaluator reads the state it is given: lags driving
+/// `Σψ·â` to `-1e6` give a positive `TruncationWithPenalty` cap with a zero lower bound, and `+1e6`
+/// gives a `+0.0` cap.
+#[test]
+fn inflow_slack_bounds_for_probe_evaluates_the_given_state() {
+    let setup = fresh_setup_with(Path::new(D19_DIR), |config| {
+        apply_oracle_config(config);
+        config.modeling.inflow_non_negativity.method = CfgInflowMethod::TruncationWithPenalty;
+    });
+    let mut workspace_pool = setup
+        .create_workspace_pool(&StubComm, 1, ActiveSolver::new)
+        .expect("create_workspace_pool must succeed");
+    let ws = &mut workspace_pool.workspaces[0];
+    let training_ctx = setup.training_ctx();
+    let state = setup.stage_state();
+    let par = training_ctx.stochastic.par();
+    let raw_noise = training_ctx.stochastic.tree_view().opening(1, 0).to_vec();
+
+    let lag_driven: Vec<(usize, f64)> = (0..state.hydro_count)
+        .map(|h| (h, par.psi_slice(1, h).iter().sum::<f64>()))
+        .filter(|&(_, psi_sum)| psi_sum.abs() > 1e-6)
+        .collect();
+    assert!(
+        !lag_driven.is_empty(),
+        "vacuity guard: no D19 hydro has a nonzero stage-1 lag coefficient"
+    );
+
+    let state_at = |target: f64| {
+        let mut x = training_ctx.initial_state.to_vec();
+        for &(h, psi_sum) in &lag_driven {
+            for lag in 0..par.psi_slice(1, h).len() {
+                x[state.inflow_lags.start + lag * state.hydro_count + h] = target / psi_sum;
+            }
+        }
+        x
+    };
+    let x_lo = state_at(-1.0e6);
+    let x_hi = state_at(1.0e6);
+
+    let (lower_lo, upper_lo) =
+        inflow_slack_bounds_for_probe(ws, &training_ctx, StageIdx(1), &x_lo, &raw_noise);
+    let (_, upper_hi) =
+        inflow_slack_bounds_for_probe(ws, &training_ctx, StageIdx(1), &x_hi, &raw_noise);
+    for &(h, _) in &lag_driven {
+        assert!(
+            upper_lo[h] > 0.0,
+            "hydro {h}: x_lo must give a positive cap"
+        );
+        assert_eq!(lower_lo[h], 0.0, "hydro {h}: the TwP lower bound is 0");
+        assert_eq!(
+            upper_hi[h].to_bits(),
+            0.0_f64.to_bits(),
+            "hydro {h}: x_hi must give a +0.0 cap"
+        );
+    }
+}
+
+/// The bound-override probe reaches the successor LP: pinning the slack at given
+/// bounds returns that slack as the solved primal.
+#[test]
+fn frozen_inflow_slack_bounds_reach_the_successor_lp() {
+    let setup = fresh_setup_with(Path::new(D19_DIR), |_| {});
+    let mut workspace_pool = setup
+        .create_workspace_pool(&StubComm, 1, ActiveSolver::new)
+        .expect("create_workspace_pool must succeed");
+    let ws = &mut workspace_pool.workspaces[0];
+    let training_ctx = setup.training_ctx();
+    let stage_ctx = setup.stage_ctx();
+    let (lo, hi) = stage_state_box_bounds(&setup, 1);
+    let x: Vec<f64> = (0..lo.len())
+        .map(|j| {
+            if lo[j].is_finite() && hi[j].is_finite() {
+                f64::midpoint(lo[j], hi[j])
+            } else {
+                training_ctx.initial_state[j]
+            }
+        })
+        .collect();
+    let raw_noise = training_ctx.stochastic.tree_view().opening(2, 0).to_vec();
+
+    for pinned in [[1.0_f64, 2.0], [0.0, 0.0]] {
+        let (_, slack) = write_backward_opening_outcome_with_inflow_slack_bounds_for_probe(
+            ws,
+            &stage_ctx,
+            &training_ctx,
+            &setup.fcf.pools[2],
+            &training_ctx.cut_state_layouts[1],
+            StageIdx(2),
+            setup.inputs.node_graph.node_ids[NodePos(2)],
+            &x,
+            &raw_noise,
+            &pinned,
+            &pinned,
+        )
+        .expect("the override probe must solve");
+        assert_eq!(slack.len(), pinned.len());
+        for (h, (&got, &want)) in slack.iter().zip(&pinned).enumerate() {
+            assert!(
+                (got - want).abs() <= 1e-9 * 1.0_f64.max(want.abs()),
+                "hydro {h}: slack primal {got}, pinned at {want}"
+            );
+        }
+    }
 }
