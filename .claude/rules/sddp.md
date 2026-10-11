@@ -87,6 +87,88 @@ column bounds under the truncation methods; and
 `inflow_slack_follows_z_routing_for_prefilling` (`lp/builder/entries.rs`) for
 the slack route.
 
+## Truncation keeps the PAR state raw; the correction is a bounded column
+
+Under `truncation` and `truncation_with_penalty` η is never clamped: the z RHS
+is `b + σ·η` (0 without a PAR model) for every method, and outgoing lag 0 is
+built from the raw z primal — directly, or through the multi-resolution lag
+accumulator — with no clamp, so it may be negative (`assemble_outgoing_state`
+never clamps inflow lags; they are unbounded in the state box). The correction
+is the hydro's own inflow-slack column. Whenever the family exists it carries
+exactly z's water-row entries (`push_local_inflow_coupling`); only under the
+truncation methods does it also carry `+1` in the generic `hydro_inflow` term
+(`push_local_inflow_rate`). Its template bounds are `[0, 0]`
+(`fill_inflow_slack_columns`), and every solve patches them to `[l*, l*]` at
+cost 0 under `truncation` or to `[0, l*]` at `c_inf·T` (the hydro's
+`inflow_nonnegativity_cost` times the stage hours) under
+`truncation_with_penalty`, with `l* = max(−r(â, η), 0)` written as `+0.0` when
+`r ≥ 0`. `r` is the raw PAR value `evaluate_par_batch` returns at
+`current_state[inflow_lags]` — this solve's pinned lags — and this solve's
+noise. `transform_inflow_noise` writes the physical bounds and
+`apply_inflow_slack_col_bounds` applies them divided by `col_scale`,
+identically at every solve site (forward, enumerated forward, backward per
+opening, simulation, lower bound) through `StageSolvePrep::run`.
+
+Wrong-but-compiling alternatives:
+
+- clamping η before the solve (the old mechanism): it censors the PAR state,
+  so the lag carries `r⁺` instead of `r` and every successor cut is evaluated
+  at the wrong lag;
+- computing `l*` from a precomputed scenario path instead of the pinned lags:
+  the backward openings and the lower bound pin a different trial state than
+  the forward path, so their bounds would be wrong;
+- an unbounded slack under `truncation_with_penalty`: it turns the slack into
+  a priced virtual water source usable when the inflow is positive;
+- an unscaled bound write (copying the NCS patch, whose columns have
+  `col_scale = 1`): the slack's water-row entries are `−ζ`/`−τ_k`, so its
+  column scale is not 1 and an unscaled write mis-sizes `l*` by it;
+- a non-zero cost on the `truncation` column: a fixed column with cost `c`
+  adds the constant `c·T·l*` to every objective, lower bound and cut.
+
+Known limitation (Larroyd et al. (2022), the paper's §2.5): `l*` depends on the
+trial state, so a cut taken with the correction frozen at `l*(x̂_k, ω)` can
+exceed the true successor cost at any `x` where `l*(x, ω) ≠ l*(x̂_k, ω)` —
+where truncation is deeper, and, when the extra water must be spilled at a
+cost or against a spillage bound, also where it is shallower. The lower bound
+is then not guaranteed to stay below the upper bound, and a `gap` rule
+(admitted only under enumerated forward selection,
+`reject_gap_under_sampled_selection`) can report false convergence because it
+reads `(UB − LB).max(0.0)`. This is not remedied. Each stored cut stays a
+valid minorant of the successor value with the slack bounds frozen at its own
+trial state, which is what the cut oracles assert (`check_pool` in
+`tests/common/cut_oracles.rs`), so validity is checked on every truncation
+deck with no exclusion.
+
+Read: `stochastic/noise.rs` (`transform_inflow_noise`,
+`apply_inflow_slack_col_bounds`), `training/stage_solve_prep.rs`
+(`StageSolvePrep::run`), `lp/builder/columns.rs` (`fill_inflow_slack_columns`),
+`lp/builder/entries.rs` (`push_local_inflow_coupling`),
+`lp/builder/generic_constraints.rs` (`push_local_inflow_rate`),
+`stochastic/inflow_method.rs` (`truncates`, `slack_is_priced`),
+`solve/stage_solve.rs` (`assemble_outgoing_state`). Pinned by
+`test_transform_inflow_noise_truncation_writes_the_raw_rhs_and_fixes_the_correction`
+(the z RHS is never clamped; bounds `[l*, l*]` — forbids clamping η),
+`test_transform_inflow_noise_truncation_with_penalty_caps_the_correction`
+(bounds `[0, l*]` — forbids an unbounded slack),
+`truncation_slack_bound_is_divided_by_col_scale` (forbids an unscaled bound
+write) and `inflow_slack_index_buffer_rebuilds_on_start_change_at_equal_length`
+(the patch addresses the current stage's slack columns), all in
+`stochastic/noise.rs`; `inflow_slack_follows_z_routing_for_prefilling`
+(`lp/builder/entries.rs`); `inflow_slack_objective_and_template_bounds_follow_the_method`
+(`tests/inflow_nonnegativity.rs`, cost 0 and template `[0, 0]` under
+`truncation` — forbids a non-zero cost);
+`hydro_inflow_counts_the_truncation_correction_only_under_truncation_methods`
+(`tests/hydro_inflow_travel_time.rs`);
+`every_noise_dimension_patches_only_its_own_entity`
+(`tests/patch_ownership_sweep.rs`);
+`truncation_writes_the_raw_rhs_and_fixes_the_slack_at_the_correction`
+(`training/forward/tests.rs`); and, in `tests/cut_oracles.rs`,
+`inflow_slack_bounds_for_probe_evaluates_the_given_state` (`l*` follows the
+pinned lags of the given state — forbids a precomputed scenario path),
+`frozen_inflow_slack_bounds_reach_the_successor_lp` and
+`cut_oracles_hold_on_every_committed_deck_with_lag_or_anticipated_state` (each
+stored cut is a minorant of its own frozen-correction successor value).
+
 ## FPHA uses average storage
 
 The FPHA generation constraint is
@@ -572,7 +654,7 @@ warm-vs-cold per-scenario cost bit-identity.
 Non-controllable-source availability `α_r(ω) ∈ [0, 1]` is dimensionless. The
 realized cap is `A_r = max_gen · clamp(mean + std·η, 0, 1)`. The
 `non_controllable_stats.parquet` stores `(mean, std)` **as factors**, not as MW.
-Read: `stochastic/noise.rs` (`transform_ncs_noise`, `compute_effective_eta`).
+Read: `stochastic/noise.rs` (`transform_ncs_noise`).
 
 ## Lower-bound evaluation must patch NCS
 

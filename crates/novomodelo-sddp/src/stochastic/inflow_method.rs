@@ -11,7 +11,10 @@ use novomodelo_io::config::InflowNonNegativityMethod::TruncationWithPenalty;
 /// Inflow non-negativity treatment method.
 ///
 /// The variant must be the same across all stages (set once at solver
-/// initialisation from the loaded case config).
+/// initialisation from the loaded case config). Under either truncation method
+/// the lower bound is not guaranteed to stay below the upper bound, and a `gap`
+/// stopping rule can report convergence that has not occurred (Larroyd et al.
+/// (2022), the paper's §2.5).
 ///
 /// # Examples
 ///
@@ -28,22 +31,18 @@ use novomodelo_io::config::InflowNonNegativityMethod::TruncationWithPenalty;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InflowNonNegativityMethod {
-    /// No enforcement: no slack columns; a sufficiently negative PAR(p)
-    /// realisation may make the LP infeasible.
+    /// No slack column; a negative inflow realisation can make the LP infeasible.
     None,
 
-    /// The PAR value `r` stays raw, and the hydro's inflow-slack column is fixed per
-    /// solve at the truncation amount `max(−r, 0)`, at cost 0.
+    /// The PAR value `r` stays raw; the slack is fixed per solve at the truncation
+    /// amount `max(−r, 0)`, at cost 0.
     Truncation,
 
-    /// Appends `N` slack columns (`sigma_inf_h >= 0`); each enters hydro `h`'s
-    /// water-balance row with coefficient `tau_total * M3S_TO_HM3`
-    /// (`tau_total` = total stage hours). Objective coefficient from
-    /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0).
+    /// Slack `[0, ∞)` priced at `inflow_nonnegativity_cost` times the stage hours.
     Penalty,
 
-    /// The raw PAR value `r` stays unclamped, and the hydro's slack column, bounded
-    /// per solve to `[0, max(−r, 0)]`, is priced at `inflow_nonnegativity_cost`.
+    /// The PAR value `r` stays raw; the slack is capped per solve at the truncation
+    /// amount `max(−r, 0)` and priced like `Penalty`.
     TruncationWithPenalty,
 }
 
