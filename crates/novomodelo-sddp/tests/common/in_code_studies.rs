@@ -1466,6 +1466,10 @@ pub struct ChronologicalNoiseSpec {
     pub par1_psi: Option<[f64; 2]>,
     /// Inflow non-negativity cost, shared by both hydros.
     pub inflow_nonnegativity_cost: f64,
+    /// Deterministic bus load \[MW\] on both stages.
+    pub load_mean_mw: f64,
+    /// Initial storage \[hm³\], shared by both hydros.
+    pub initial_storage_hm3: f64,
 }
 
 impl Default for ChronologicalNoiseSpec {
@@ -1481,6 +1485,8 @@ impl Default for ChronologicalNoiseSpec {
             inflow_mean_m3s: CHRONOLOGICAL_NOISE_INFLOW_MEAN_M3S,
             par1_psi: None,
             inflow_nonnegativity_cost: 0.0,
+            load_mean_mw: 0.0,
+            initial_storage_hm3: CHRONOLOGICAL_NOISE_INITIAL_STORAGE_HM3,
         }
     }
 }
@@ -1614,7 +1620,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
         .map(|i| LoadModel {
             bus_id: EntityId(CHRONOLOGICAL_NOISE_BUS_ID),
             stage_id: i32::try_from(i).expect("stage index fits i32"),
-            mean_mw: 0.0,
+            mean_mw: spec.load_mean_mw,
             std_mw: 0.0,
         })
         .collect();
@@ -1688,7 +1694,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
             .iter()
             .map(|&id| HydroStorage {
                 hydro_id: EntityId(id),
-                value_hm3: CHRONOLOGICAL_NOISE_INITIAL_STORAGE_HM3,
+                value_hm3: spec.initial_storage_hm3,
             })
             .collect(),
         filling_storage: vec![],

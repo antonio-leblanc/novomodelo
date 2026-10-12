@@ -936,3 +936,125 @@ fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<Cu
         .map(|_| CutStateProjection::new(global, full))
         .collect()
 }
+
+mod default_method_equivalence {
+    use novomodelo_io::Config;
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::SimulationScenarioResult;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code, run_simulation};
+
+    const TRAINING_ITERATIONS: usize = 3;
+    const SIMULATION_SCENARIOS: u32 = 20;
+    const SCARCE_WATER_LOAD_MW: f64 = 400.0;
+    const SCARCE_WATER_INITIAL_STORAGE_HM3: f64 = 100.0;
+
+    struct RunFingerprint {
+        cut_bits: Vec<Vec<u64>>,
+        simulation_json: String,
+        results: Vec<SimulationScenarioResult>,
+    }
+
+    /// `None` omits the method from the config, so it resolves through the
+    /// deserialization default.
+    fn study_config(method: Option<CfgInflowMethod>) -> (novomodelo_core::System, Config) {
+        let spec = ChronologicalNoiseSpec {
+            load_mean_mw: SCARCE_WATER_LOAD_MW,
+            initial_storage_hm3: SCARCE_WATER_INITIAL_STORAGE_HM3,
+            inflow_nonnegativity_cost: 1.0,
+            ..negative_draw_par1_spec(method.unwrap_or(CfgInflowMethod::None))
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled {
+            num_scenarios: SIMULATION_SCENARIOS,
+        });
+        if method.is_some() {
+            return (system, config);
+        }
+        let mut value = serde_json::to_value(&config).expect("Config serializes");
+        value["modeling"]["inflow_non_negativity"]
+            .as_object_mut()
+            .expect("the study config carries an inflow_non_negativity object")
+            .remove("method")
+            .expect("the study config declares the method explicitly");
+        let omitted =
+            serde_json::from_value(value).expect("Config without the method deserializes");
+        (system, omitted)
+    }
+
+    fn run(method: Option<CfgInflowMethod>) -> RunFingerprint {
+        let (system, config) = study_config(method);
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, TRAINING_ITERATIONS);
+        let cut_bits = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|pool| {
+                pool.active_cuts()
+                    .flat_map(|(slot, intercept, beta)| {
+                        std::iter::once(slot as u64)
+                            .chain(std::iter::once(intercept.to_bits()))
+                            .chain(beta.iter().map(|b| b.to_bits()))
+                    })
+                    .collect()
+            })
+            .collect();
+        let simulation_json =
+            serde_json::to_string(&results).expect("simulation results serialize");
+        RunFingerprint {
+            cut_bits,
+            simulation_json,
+            results,
+        }
+    }
+
+    /// A config that omits the inflow non-negativity method trains and simulates
+    /// bit-for-bit like `truncation_with_penalty` declared explicitly, on a study
+    /// with negative draws and an active correction; `penalty` differs.
+    #[test]
+    fn omitted_method_trains_and_simulates_like_explicit_truncation_with_penalty() {
+        let omitted = run(None);
+        let explicit = run(Some(CfgInflowMethod::TruncationWithPenalty));
+        let penalty = run(Some(CfgInflowMethod::Penalty));
+
+        let hydro_rows = || {
+            explicit
+                .results
+                .iter()
+                .flat_map(|scenario| &scenario.stages)
+                .flat_map(|stage| &stage.hydros)
+        };
+        assert!(
+            hydro_rows().any(|row| row.incremental_inflow_m3s < 0.0),
+            "vacuity guard: no simulated row draws a negative inflow"
+        );
+        assert!(
+            hydro_rows().any(|row| row.inflow_nonnegativity_slack_m3s > 0.0),
+            "vacuity guard: no simulated row uses the inflow correction"
+        );
+        assert!(
+            explicit.cut_bits.iter().any(|pool| !pool.is_empty()),
+            "vacuity guard: training stored no cut"
+        );
+
+        assert_eq!(
+            omitted.cut_bits, explicit.cut_bits,
+            "the omitted method must train the same cuts as explicit truncation_with_penalty"
+        );
+        assert_eq!(
+            omitted.simulation_json, explicit.simulation_json,
+            "the omitted method must simulate like explicit truncation_with_penalty"
+        );
+        assert_ne!(
+            penalty.simulation_json, explicit.simulation_json,
+            "non-degeneracy twin: penalty must simulate differently"
+        );
+    }
+}
