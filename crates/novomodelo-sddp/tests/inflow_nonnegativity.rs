@@ -1448,3 +1448,86 @@ mod slack_closed_forms {
         }
     }
 }
+
+mod raw_lag_continuation {
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::setup::NodePos;
+    use novomodelo_sddp::test_support::node_opening_noise;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code, run_simulation};
+
+    fn tol(x: f64) -> f64 {
+        1e-9 * x.abs().max(1.0)
+    }
+
+    /// Under `truncation` stage 0's raw PAR value `r₁ = b₀ + σ₀·η₀` (zero lag seed),
+    /// negative, is stage 1's incoming lag, and stage 1's z is
+    /// `b₁ + ψ₁·r₁ + σ₁·η₁` with the correction at `max(−z, 0)`; one opening per
+    /// stage makes η known.
+    #[test]
+    fn truncation_keeps_the_raw_par_value_as_the_next_lag() {
+        let spec = ChronologicalNoiseSpec {
+            branching_factor: 1,
+            ..negative_draw_par1_spec(CfgInflowMethod::Truncation)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
+        let hydro_ids: Vec<i32> = system.hydros().iter().map(|h| h.id.0).collect();
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, 1);
+        let par = setup.inputs.stochastic.par();
+        let eta0 = node_opening_noise(&setup, NodePos(0), 0);
+        let eta1 = node_opening_noise(&setup, NodePos(1), 0);
+        let scenario = results.first().expect("one simulated scenario");
+        let stage = |t: u32| {
+            scenario
+                .stages
+                .iter()
+                .find(|s| s.stage_id == t)
+                .unwrap_or_else(|| panic!("stage {t} is simulated"))
+        };
+
+        let mut any_negative = false;
+        for (h, &id) in hydro_ids.iter().enumerate() {
+            let r1 = par.deterministic_base(0, h) + par.sigma(0, h) * eta0[h];
+            eprintln!("hydro {id}: r1 = {r1} (eta0 = {})", eta0[h]);
+            any_negative |= r1 < -1.0;
+
+            let lag0 = stage(1)
+                .inflow_lags
+                .iter()
+                .find(|l| l.hydro_id == id && l.lag_index == 0)
+                .unwrap_or_else(|| panic!("hydro {id}: stage 1 records its incoming lag 0"));
+            assert!(
+                (lag0.inflow_m3s - r1).abs() <= tol(r1),
+                "hydro {id}: stage 1's incoming lag {} must be the raw r1 = {r1}",
+                lag0.inflow_m3s
+            );
+
+            let psi = par.psi_slice(1, h)[0];
+            let z2 = par.deterministic_base(1, h) + psi * r1 + par.sigma(1, h) * eta1[h];
+            for row in stage(1).hydros.iter().filter(|row| row.hydro_id == id) {
+                assert!(
+                    (row.incremental_inflow_m3s - z2).abs() <= tol(z2),
+                    "hydro {id}: stage 1 z {} must be b + psi*r1 + sigma*eta = {z2}",
+                    row.incremental_inflow_m3s
+                );
+                assert!(
+                    (row.inflow_nonnegativity_slack_m3s - (-z2).max(0.0)).abs() <= tol(z2),
+                    "hydro {id}: stage 1 slack {} must be max(-z, 0) for z = {z2}",
+                    row.inflow_nonnegativity_slack_m3s
+                );
+            }
+        }
+        assert!(
+            any_negative,
+            "precondition: seed 42's single stage-0 opening gives no hydro r1 < -1"
+        );
+    }
+}
