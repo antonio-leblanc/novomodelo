@@ -1879,3 +1879,160 @@ mod water_balance_closure {
         );
     }
 }
+
+mod truncation_order_invariance {
+    use std::collections::BTreeMap;
+
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::setup::{NodePos, StageIdx};
+    use novomodelo_sddp::test_support::{inflow_slack_bounds_for_probe, node_opening_noise};
+    use novomodelo_solver::ActiveSolver;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{StubComm, build_setup_in_code, run_simulation};
+
+    /// Per (scenario, stage, block, hydro id): slack, z and incoming lag-0 bits;
+    /// per (stage, archived state, opening, hydro id): the probe's slack bound bits.
+    struct Fingerprint {
+        records: BTreeMap<(u32, u32, Option<u32>, i32), [u64; 3]>,
+        bounds: BTreeMap<(usize, usize, usize, i32), [u64; 2]>,
+        max_bound: f64,
+        min_lag: f64,
+        max_lstar_gap: f64,
+    }
+
+    fn run(reverse_declaration_order: bool) -> Fingerprint {
+        let spec = ChronologicalNoiseSpec {
+            reverse_declaration_order,
+            ..negative_draw_par1_spec(CfgInflowMethod::Truncation)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 20 });
+        let mut hydro_ids: Vec<i32> = system.hydros().iter().map(|h| h.id.0).collect();
+        hydro_ids.sort_unstable();
+
+        let mut setup = build_setup_in_code(system, &config);
+        setup.set_export_states(true);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &StubComm, 1, ActiveSolver::new, None, None)
+            .expect("training");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let archive = outcome.result.visited_archive.expect("visited archive");
+
+        let mut pool = setup
+            .create_workspace_pool(&StubComm, 1, ActiveSolver::new)
+            .expect("workspace pool");
+        let ws = &mut pool.workspaces[0];
+        let training_ctx = setup.training_ctx();
+        let n_state = training_ctx.state.n_state;
+        let mut bounds = BTreeMap::new();
+        let (mut max_bound, mut max_lstar_gap) = (0.0_f64, 0.0_f64);
+        let n_stages = setup.inputs.node_graph.nodes.len();
+        for stage in 1..n_stages {
+            let n_openings = setup.inputs.node_graph.nodes[NodePos(stage)].openings.len;
+            for (k, x) in archive
+                .states_for_node(NodePos(stage - 1))
+                .chunks_exact(n_state)
+                .enumerate()
+            {
+                for o in 0..n_openings {
+                    let noise = node_opening_noise(&setup, NodePos(stage), o);
+                    let (lower, upper) = inflow_slack_bounds_for_probe(
+                        ws,
+                        &training_ctx,
+                        StageIdx(stage),
+                        x,
+                        &noise,
+                    );
+                    for (h, &id) in hydro_ids.iter().enumerate() {
+                        bounds.insert((stage, k, o, id), [lower[h].to_bits(), upper[h].to_bits()]);
+                        max_bound = max_bound.max(upper[h]);
+                    }
+                    max_lstar_gap = max_lstar_gap.max((upper[0] - upper[1]).abs());
+                }
+            }
+        }
+
+        let (system, _) = chronological_noise_study(&spec);
+        let mut simulation_setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut simulation_setup, 1);
+        let mut records = BTreeMap::new();
+        let mut min_lag = f64::INFINITY;
+        for scenario in &results {
+            for stage in &scenario.stages {
+                for r in &stage.hydros {
+                    let lag = stage
+                        .inflow_lags
+                        .iter()
+                        .find(|l| l.hydro_id == r.hydro_id && l.lag_index == 0)
+                        .map_or(0.0, |l| l.inflow_m3s);
+                    min_lag = min_lag.min(lag);
+                    records.insert(
+                        (scenario.scenario_id, stage.stage_id, r.block_id, r.hydro_id),
+                        [
+                            r.inflow_nonnegativity_slack_m3s.to_bits(),
+                            r.incremental_inflow_m3s.to_bits(),
+                            lag.to_bits(),
+                        ],
+                    );
+                }
+            }
+        }
+        Fingerprint {
+            records,
+            bounds,
+            max_bound,
+            min_lag,
+            max_lstar_gap,
+        }
+    }
+
+    /// Under `truncation`, the per-solve correction, the raw z and the incoming
+    /// lags of every simulated record, and the slack bounds at every archived trial
+    /// state, are bit-identical with the entity declaration order reversed, keyed by
+    /// hydro id; ψ and σ differ between the hydros, so a positional mix-up moves them.
+    #[test]
+    fn truncation_lag_sequence_is_order_invariant() {
+        let base = run(false);
+        let repeat = run(false);
+        let reversed = run(true);
+
+        assert!(base.max_bound > 0.0, "guard: no positive slack bound");
+        assert!(base.min_lag < 0.0, "guard: no negative incoming lag");
+        assert!(
+            base.max_lstar_gap > 1.0,
+            "guard: the two hydros' l* never differ by more than 1"
+        );
+        assert!(
+            !base.records.is_empty() && !base.bounds.is_empty(),
+            "guard: nothing compared"
+        );
+
+        assert!(
+            base.records == repeat.records,
+            "simulation records differ between two fresh runs"
+        );
+        assert!(
+            base.bounds == repeat.bounds,
+            "slack bounds differ between two fresh runs"
+        );
+        assert!(
+            base.records == reversed.records,
+            "simulation records differ under declaration-order reversal"
+        );
+        assert!(
+            base.bounds == reversed.bounds,
+            "slack bounds differ under declaration-order reversal"
+        );
+    }
+}

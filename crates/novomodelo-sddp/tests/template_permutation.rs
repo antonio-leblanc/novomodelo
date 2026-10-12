@@ -15,8 +15,10 @@ use common::build_setup_in_code;
 use common::fresh_setup_with;
 use common::in_code_studies::{
     ChronologicalNoiseSpec, chronological_noise_study, mixed_lead_anticipated_study,
+    negative_draw_par1_spec,
 };
 use common::permute::permute_case;
+use novomodelo_io::config::InflowNonNegativityMethod as CfgInflowMethod;
 
 const SEED: u64 = 0x5EED_C0BE_5EED_C0BE;
 
@@ -96,6 +98,19 @@ fn every_in_code_study_template_is_invariant_to_declaration_order() {
     let reversed_setup = build_setup_in_code(system, &config);
     for group in mismatched_groups(&base_setup, &reversed_setup, chronological_pumping_label) {
         mismatches.push((chronological_pumping_label.to_string(), group));
+    }
+
+    let negative_draw_label = "in-code/negative-draw-par1-truncation";
+    let (system, config) =
+        chronological_noise_study(&negative_draw_par1_spec(CfgInflowMethod::Truncation));
+    let base_setup = build_setup_in_code(system, &config);
+    let (system, config) = chronological_noise_study(&ChronologicalNoiseSpec {
+        reverse_declaration_order: true,
+        ..negative_draw_par1_spec(CfgInflowMethod::Truncation)
+    });
+    let reversed_setup = build_setup_in_code(system, &config);
+    for group in mismatched_groups(&base_setup, &reversed_setup, negative_draw_label) {
+        mismatches.push((negative_draw_label.to_string(), group));
     }
 
     assert!(
