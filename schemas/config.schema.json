@@ -217,8 +217,8 @@
       "properties": {
         "method": {
           "$ref": "#/$defs/InflowNonNegativityMethod",
-          "default": "penalty",
-          "description": "Method: `\"none\"`, `\"truncation\"`, `\"penalty\"`, or `\"truncation_with_penalty\"`.\n\nDefault: `\"penalty\"`. The penalty objective coefficient is always sourced from\n`penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent)."
+          "default": "truncation_with_penalty",
+          "description": "Method: `\"none\"`, `\"truncation\"`, `\"penalty\"`, or `\"truncation_with_penalty\"`.\n\nDefault: `\"truncation_with_penalty\"`. The penalty objective coefficient is always sourced from\n`penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent)."
         }
       },
       "type": "object"
@@ -297,7 +297,7 @@
         "inflow_non_negativity": {
           "$ref": "#/$defs/InflowNonNegativityConfig",
           "default": {
-            "method": "penalty"
+            "method": "truncation_with_penalty"
           },
           "description": "Strategy for handling non-negative inflow constraints."
         }
@@ -1376,7 +1376,7 @@
       "default": {
         "cost_scale_factor": null,
         "inflow_non_negativity": {
-          "method": "penalty"
+          "method": "truncation_with_penalty"
         }
       },
       "description": "Modeling options (inflow non-negativity treatment)."

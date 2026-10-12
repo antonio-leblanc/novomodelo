@@ -22,9 +22,9 @@ pub enum InflowNonNegativityMethod {
     /// Penalty-based enforcement via slack columns.
     ///
     /// Objective coefficient is `penalties.json → hydro.inflow_nonnegativity_cost`.
-    #[default]
     Penalty,
     /// Combined truncation and penalty enforcement.
+    #[default]
     TruncationWithPenalty,
 }
 
@@ -62,7 +62,7 @@ pub struct ModelingConfig {
 pub struct InflowNonNegativityConfig {
     /// Method: `"none"`, `"truncation"`, `"penalty"`, or `"truncation_with_penalty"`.
     ///
-    /// Default: `"penalty"`. The penalty objective coefficient is always sourced from
+    /// Default: `"truncation_with_penalty"`. The penalty objective coefficient is always sourced from
     /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent).
     pub method: InflowNonNegativityMethod,
 }
@@ -70,7 +70,7 @@ pub struct InflowNonNegativityConfig {
 impl Default for InflowNonNegativityConfig {
     fn default() -> Self {
         Self {
-            method: InflowNonNegativityMethod::Penalty,
+            method: InflowNonNegativityMethod::TruncationWithPenalty,
         }
     }
 }

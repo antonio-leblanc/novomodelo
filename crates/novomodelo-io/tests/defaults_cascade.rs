@@ -22,8 +22,8 @@ fn test_minimal_config_all_defaults() {
 
     assert_eq!(
         cfg.modeling.inflow_non_negativity.method,
-        InflowNonNegativityMethod::Penalty,
-        "inflow_non_negativity.method should default to Penalty"
+        InflowNonNegativityMethod::TruncationWithPenalty,
+        "inflow_non_negativity.method should default to TruncationWithPenalty"
     );
 
     assert!(
@@ -183,8 +183,8 @@ fn test_config_absent_modeling_uses_defaults() {
 
     assert_eq!(
         cfg.modeling.inflow_non_negativity.method,
-        InflowNonNegativityMethod::Penalty,
-        "absent modeling section must default method to Penalty"
+        InflowNonNegativityMethod::TruncationWithPenalty,
+        "absent modeling section must default method to TruncationWithPenalty"
     );
 }
 
