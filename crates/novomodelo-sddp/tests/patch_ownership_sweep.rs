@@ -20,7 +20,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use novomodelo_core::{BlockMode, EntityId};
-use novomodelo_io::config::InflowNonNegativityMethod as CfgInflowMethod;
+use novomodelo_io::config::{InflowNonNegativityMethod as CfgInflowMethod, StoppingRuleConfig};
 use novomodelo_sddp::indexer::{BlockIdx, BusSys, HydroSys, NcsSys, StateSpace};
 use novomodelo_sddp::lp::StageGeometry;
 use novomodelo_sddp::setup::{NodePos, StageIdx};
@@ -34,9 +34,9 @@ use novomodelo_solver::{ActiveSolver, StageTemplate};
 
 use common::in_code_studies::{
     ChronologicalNoiseSpec, chronological_noise_study, mixed_lead_anticipated_study,
-    stochastic_parallel_study,
+    negative_draw_par1_spec, stochastic_parallel_study,
 };
-use common::{build_setup_in_code, fresh_setup_with};
+use common::{StubComm, build_setup_in_code, fresh_setup_with};
 
 #[test]
 fn capture_at_initial_state_matches_node_capture() {
@@ -387,16 +387,31 @@ fn every_noise_dimension_patches_only_its_own_entity() {
         &mut vacuity,
     );
 
-    for (label, block_mode) in [
+    for (label, block_mode, inflow_method) in [
         (
             "in-code/twp-negative-inflow-chronological",
             BlockMode::Chronological,
+            CfgInflowMethod::TruncationWithPenalty,
         ),
-        ("in-code/twp-negative-inflow-parallel", BlockMode::Parallel),
+        (
+            "in-code/twp-negative-inflow-parallel",
+            BlockMode::Parallel,
+            CfgInflowMethod::TruncationWithPenalty,
+        ),
+        (
+            "in-code/truncation-negative-inflow-chronological",
+            BlockMode::Chronological,
+            CfgInflowMethod::Truncation,
+        ),
+        (
+            "in-code/truncation-negative-inflow-parallel",
+            BlockMode::Parallel,
+            CfgInflowMethod::Truncation,
+        ),
     ] {
         let (system, config) = chronological_noise_study(&ChronologicalNoiseSpec {
             block_modes: [block_mode; 2],
-            inflow_method: CfgInflowMethod::TruncationWithPenalty,
+            inflow_method,
             inflow_mean_m3s: -30.0,
             ..ChronologicalNoiseSpec::default()
         });
@@ -565,6 +580,140 @@ fn lower_bound_root_lp_matches_the_forward_root_lp() {
         "lower-bound vs forward root LP mismatches:\n{}",
         violations.join("\n")
     );
+}
+
+const TRIAL_STATE_ITERATIONS: u32 = 3;
+
+/// The lower bound and the forward pass apply the same slack bounds at the root,
+/// and a stage-1 solve at an archived non-initial trial state applies the closed
+/// form `l* = max(−(b + Σψ·â + σ·η), 0)` at that state's own lags, under both
+/// truncation methods.
+#[test]
+fn truncation_slack_bounds_are_identical_across_solve_sites() {
+    for method in [
+        CfgInflowMethod::Truncation,
+        CfgInflowMethod::TruncationWithPenalty,
+    ] {
+        let label = format!("negative-draw-par1/{method:?}");
+        let (system, config) = chronological_noise_study(&negative_draw_par1_spec(method));
+        let mut config = config;
+        config.training.stopping_rules = Some(vec![StoppingRuleConfig::IterationLimit {
+            limit: TRIAL_STATE_ITERATIONS,
+        }]);
+        let mut setup = build_setup_in_code(system, &config);
+
+        let mut violations = Vec::new();
+        let compared = compare_lower_bound_to_forward_root_lp(&label, &setup, &mut violations);
+        assert!(compared >= 1, "{label}: no root opening compared");
+        assert!(
+            violations.is_empty(),
+            "{label}: lower bound vs forward root LP:\n{}",
+            violations.join("\n")
+        );
+        let root = root_node(&setup);
+        let initial_state = oracle_initial_state(&setup);
+        let root_slack = setup.inputs.stage_data.stage_templates.geometry_per_stage[0]
+            .inflow_slack
+            .clone();
+        let positive_root_cap = (0..compared).any(|j| {
+            let noise = node_opening_noise(&setup, root, j);
+            let template = capture_patched_node_template_at(&setup, root, &noise, &initial_state);
+            template.col_upper[root_slack.clone()]
+                .iter()
+                .any(|&u| u > 0.0)
+        });
+        assert!(
+            positive_root_cap,
+            "{label}: guard: no root opening has a positive slack cap"
+        );
+
+        setup.set_export_states(true);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+        let outcome = setup
+            .train(&mut solver, &StubComm, 1, ActiveSolver::new, None, None)
+            .expect("training must return Ok");
+        assert!(
+            outcome.error.is_none(),
+            "{label}: training error: {:?}",
+            outcome.error
+        );
+        let archive = outcome
+            .result
+            .visited_archive
+            .expect("exported states produce a visited archive");
+
+        let state = state_space(&setup).clone();
+        let n_h = state.hydro_count;
+        let par = setup.inputs.stochastic.par();
+        let next_stage = 1;
+        let node = NodePos(next_stage);
+        let geometry = &setup.inputs.stage_data.stage_templates.geometry_per_stage[next_stage];
+        let n_openings = setup.inputs.node_graph.nodes[node].openings.len;
+        let l_star = |x: &[f64], noise: &[f64], h: usize| {
+            let lags = &x[state.inflow_lags.clone()];
+            let lag_term: f64 = par
+                .psi_slice(next_stage, h)
+                .iter()
+                .enumerate()
+                .map(|(l, psi)| psi * lags[l * n_h + h])
+                .sum();
+            let r = par.deterministic_base(next_stage, h)
+                + lag_term
+                + par.sigma(next_stage, h) * noise[h];
+            (-r).max(0.0)
+        };
+
+        let (mut checked, mut moved_by_the_lag) = (0usize, 0usize);
+        for x in archive
+            .states_for_node(NodePos(0))
+            .chunks_exact(state.n_state)
+        {
+            if to_bits(x) == to_bits(&initial_state) {
+                continue;
+            }
+            for o in 0..n_openings {
+                let noise = node_opening_noise(&setup, node, o);
+                let template = capture_patched_node_template_at(&setup, node, &noise, x);
+                for h in 0..n_h {
+                    let col = geometry.inflow_slack_col(HydroSys::new(h));
+                    let expected = l_star(x, &noise, h);
+                    let tol = 1e-12 * expected.max(1.0);
+                    let upper = template.col_upper[col] * template.col_scale[col];
+                    let lower = template.col_lower[col] * template.col_scale[col];
+                    assert!(
+                        (upper - expected).abs() <= tol,
+                        "{label}: opening {o} hydro {h}: slack upper {upper} must be l* = {expected}"
+                    );
+                    if method == CfgInflowMethod::Truncation {
+                        assert!(
+                            (lower - expected).abs() <= tol,
+                            "{label}: opening {o} hydro {h}: slack lower {lower} must be l* = {expected}"
+                        );
+                    } else {
+                        assert_eq!(
+                            template.col_lower[col].to_bits(),
+                            0.0_f64.to_bits(),
+                            "{label}: opening {o} hydro {h}: slack lower bound must be 0"
+                        );
+                    }
+                    checked += 1;
+                    moved_by_the_lag +=
+                        usize::from((expected - l_star(&initial_state, &noise, h)).abs() > 1.0);
+                }
+            }
+        }
+        eprintln!(
+            "{label}: root openings compared={compared} stage-1 checks={checked} moved_by_the_lag={moved_by_the_lag}"
+        );
+        assert!(
+            checked > 0,
+            "{label}: guard: no archived non-initial stage-1 state"
+        );
+        assert!(
+            moved_by_the_lag > 0,
+            "{label}: guard: no check where the trial lag moves l* by more than 1 from the initial state"
+        );
+    }
 }
 
 fn active_decks() -> Vec<Deck> {

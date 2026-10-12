@@ -1531,3 +1531,52 @@ mod raw_lag_continuation {
         );
     }
 }
+
+mod raw_lag_simulation {
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+
+    use super::common::in_code_studies::{chronological_noise_study, negative_draw_par1_spec};
+    use super::common::{build_setup_in_code, run_simulation};
+
+    /// Under `truncation`, every simulated record's correction is `max(−z, 0)` of its
+    /// own raw z, including stage-1 records whose incoming lag is negative.
+    #[test]
+    fn truncation_simulated_slack_matches_the_negated_inflow_at_raw_lags() {
+        let (system, mut config) =
+            chronological_noise_study(&negative_draw_par1_spec(CfgInflowMethod::Truncation));
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 20 });
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, 3);
+
+        let mut negative_lag_with_slack = 0usize;
+        for stage in results.iter().flat_map(|scenario| &scenario.stages) {
+            for r in &stage.hydros {
+                let z = r.incremental_inflow_m3s;
+                assert!(
+                    (r.inflow_nonnegativity_slack_m3s - (-z).max(0.0)).abs()
+                        <= 1e-9 * z.abs().max(1.0),
+                    "stage {} hydro {}: slack {} must be max(-z, 0) for z = {z}",
+                    stage.stage_id,
+                    r.hydro_id,
+                    r.inflow_nonnegativity_slack_m3s
+                );
+                let negative_incoming_lag = stage
+                    .inflow_lags
+                    .iter()
+                    .any(|l| l.hydro_id == r.hydro_id && l.lag_index == 0 && l.inflow_m3s < 0.0);
+                negative_lag_with_slack += usize::from(
+                    stage.stage_id == 1
+                        && negative_incoming_lag
+                        && r.inflow_nonnegativity_slack_m3s > 1.0,
+                );
+            }
+        }
+        assert!(
+            negative_lag_with_slack > 0,
+            "guard: no stage-1 record with a negative incoming lag and a slack above 1"
+        );
+    }
+}
