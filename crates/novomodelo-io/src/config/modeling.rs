@@ -6,24 +6,29 @@ use serde::{Deserialize, Serialize};
 ///
 /// Accepted values in `config.json → modeling.inflow_non_negativity.method`:
 ///
-/// - `"none"` — no enforcement; PAR(p) inflows may be negative.
-/// - `"truncation"` — clamp negative PAR(p) inflows to zero before LP patching.
-/// - `"penalty"` — add slack columns with `inflow_nonnegativity_cost` objective
-///   coefficient (sourced from `penalties.json → hydro.inflow_nonnegativity_cost`).
-/// - `"truncation_with_penalty"` — combine both: clamp noise *and* add slack columns.
+/// - `"none"` — no enforcement; the PAR(p) inflow may be negative.
+/// - `"truncation"` — the PAR(p) value stays raw: it is the incremental inflow and the
+///   next stage's lag. A per-hydro correction fixed at `max(−r, 0)`, at no cost, lifts the
+///   local inflow to zero.
+/// - `"penalty"` — an unbounded correction priced by
+///   `penalties.json → hydro.inflow_nonnegativity_cost`.
+/// - `"truncation_with_penalty"` — the PAR(p) value stays raw; a correction between 0 and
+///   `max(−r, 0)`, priced by `penalties.json → hydro.inflow_nonnegativity_cost`.
+///
+/// Under the two truncation methods the correction depends on the incoming state, so the
+/// lower bound can exceed the upper bound, and a `gap` stopping rule can then report
+/// convergence that has not occurred (Larroyd et al. (2022), the paper's §2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum InflowNonNegativityMethod {
-    /// No inflow non-negativity enforcement.
+    /// No enforcement; the inflow may be negative.
     None,
-    /// Truncation-based enforcement only (no slack columns).
+    /// Raw PAR(p) value; correction fixed at the truncation amount, at no cost.
     Truncation,
-    /// Penalty-based enforcement via slack columns.
-    ///
-    /// Objective coefficient is `penalties.json → hydro.inflow_nonnegativity_cost`.
+    /// Unbounded correction priced by `penalties.json → hydro.inflow_nonnegativity_cost`.
     Penalty,
-    /// Combined truncation and penalty enforcement.
+    /// Raw PAR(p) value; priced correction capped at the truncation amount.
     #[default]
     TruncationWithPenalty,
 }
@@ -62,8 +67,10 @@ pub struct ModelingConfig {
 pub struct InflowNonNegativityConfig {
     /// Method: `"none"`, `"truncation"`, `"penalty"`, or `"truncation_with_penalty"`.
     ///
-    /// Default: `"truncation_with_penalty"`. The penalty objective coefficient is always sourced from
-    /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent).
+    /// Default: `"truncation_with_penalty"`. Under `"penalty"` and
+    /// `"truncation_with_penalty"` the correction's cost is
+    /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0 when absent);
+    /// under `"truncation"` it has no cost.
     pub method: InflowNonNegativityMethod,
 }
 
