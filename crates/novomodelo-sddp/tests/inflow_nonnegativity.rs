@@ -1115,32 +1115,38 @@ mod slack_closed_forms {
     use novomodelo_sddp::setup::NodePos;
     use novomodelo_sddp::{SimulationHydroResult, SimulationScenarioResult};
 
-    use super::{
-        Fixture, FixtureSpec, N_STAGES, build_fixture_from, empty_fcf, simulate_fixture,
-        train_fixture_into,
-    };
+    use super::{Fixture, FixtureSpec, N_STAGES, build_fixture_from, empty_fcf, simulate_fixture};
 
     const COST_SCALE: f64 = 1e6;
 
-    /// Adds one terminal-pool cut `θ ≥ (2·max(w, 0)·v_max·n − w·Σ_h v_h)/cost_scale`,
-    /// which binds over the whole storage box and prices every hydro's stored water
-    /// at `w` $/hm³ (a negative `w` makes stored water a burden).
-    fn inject_terminal_water_value(
+    /// Adds to every stage's pool one cut `θ ≥ (2·max(w, 0)·v_max·n − w·Σ_h v_h)/cost_scale`,
+    /// which binds over the whole storage box and prices every hydro's stored water at
+    /// `w` $/hm³ at every stage (a negative `w` makes stored water a burden). Pricing every
+    /// stage, not only the last, keeps the solution independent of training, so of the
+    /// dual vertex a backend picks.
+    fn inject_water_value(
         fcf: &mut FutureCostFunction,
         fx: &Fixture,
         max_storage_hm3: f64,
         w_per_hm3: f64,
     ) {
-        let terminal = N_STAGES - 1;
-        let node_id = novomodelo_sddp::test_support::chain_node_graph(&fx.stochastic).node_ids
-            [NodePos(terminal)];
+        let node_ids = novomodelo_sddp::test_support::chain_node_graph(&fx.stochastic).node_ids;
         let mut coefficients = vec![0.0; fx.state.n_state];
         for j in fx.state.storage.clone() {
             coefficients[j] = -w_per_hm3 / COST_SCALE;
         }
         let n_hydros = fx.state.storage.len() as f64;
         let intercept = 2.0 * w_per_hm3.max(0.0) * max_storage_hm3 * n_hydros / COST_SCALE;
-        fcf.add_cut(node_id, terminal, 0, 0, intercept, &coefficients);
+        for stage in 0..N_STAGES {
+            fcf.add_cut(
+                node_ids[NodePos(stage)],
+                stage,
+                0,
+                0,
+                intercept,
+                &coefficients,
+            );
+        }
     }
 
     fn records(
@@ -1159,7 +1165,6 @@ mod slack_closed_forms {
     /// Storage room for every draw: three stages of `ζ·|z|` stay inside `[0, max]`.
     const ROOMY_MAX_STORAGE_HM3: f64 = 2000.0;
     const ROOMY_INITIAL_STORAGE_HM3: f64 = 1000.0;
-    const REGIME_TRAINING_ITERATIONS: u64 = 5;
     /// Above `0.0036·w = 3.6`, so releasing stored water costs more than keeping it.
     const BURDEN_RELEASE_COST: f64 = 10.0;
 
@@ -1179,8 +1184,8 @@ mod slack_closed_forms {
         simulate_fixture(&fx, &empty_fcf(&fx)).expect("simulate must succeed")
     }
 
-    /// Trains and simulates the roomy-storage fixture with the terminal water value
-    /// injected.
+    /// Simulates the roomy-storage fixture with the water value injected at every
+    /// stage.
     fn simulate_with_terminal_water_value(
         method: InflowNonNegativityMethod,
         inflow_nonnegativity_cost: f64,
@@ -1207,9 +1212,7 @@ mod slack_closed_forms {
         };
         let fx = build_fixture_from(&spec, method);
         let mut fcf = empty_fcf(&fx);
-        inject_terminal_water_value(&mut fcf, &fx, ROOMY_MAX_STORAGE_HM3, w_per_hm3);
-        train_fixture_into(&fx, &mut fcf, REGIME_TRAINING_ITERATIONS)
-            .expect("training must succeed");
+        inject_water_value(&mut fcf, &fx, ROOMY_MAX_STORAGE_HM3, w_per_hm3);
         simulate_fixture(&fx, &fcf).expect("simulate must succeed")
     }
 
