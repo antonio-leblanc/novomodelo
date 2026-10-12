@@ -602,8 +602,8 @@ pub(crate) fn extract_sim_stage_result(
         let theta_contribution = unscaled_primal[training_ctx.state.theta] * theta_obj_coeff;
         (view_objective - theta_contribution) * ctx.cost_scale_factor
     };
-    // Realized inflow Z_t from the z_h primal: total natural inflow (PAR lag
-    // included), gross of withdrawal.
+    // Realized inflow Z_t from the z_h primal: the incremental (local) inflow, the
+    // raw PAR value (lag included), gross of withdrawal and of the non-negativity slack.
     inflow_m3s_buf.clear();
     inflow_m3s_buf.extend_from_slice(&unscaled_primal[training_ctx.state.z_inflow.clone()]);
     debug_assert_eq!(inflow_m3s_buf.len(), training_ctx.state.hydro_count);
