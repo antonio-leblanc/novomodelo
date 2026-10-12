@@ -22,8 +22,8 @@ use chrono::{NaiveDate, TimeDelta};
 use novomodelo_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
 use novomodelo_core::scenario::{InflowModel, LoadModel, NcsModel};
 use novomodelo_core::temporal::{
-    Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, Stage, StageRiskConfig,
-    StageStateConfig,
+    Block, BlockMode, NoiseMethod, PolicyGraphType, ScenarioSourceConfig, SeasonCycleType,
+    SeasonDefinition, SeasonMap, Stage, StageRiskConfig, StageStateConfig,
 };
 use novomodelo_core::{
     AnticipatedCommitmentHistory, AnticipatedConfig, BoundsCountsSpec, BoundsDefaults,
@@ -1460,6 +1460,12 @@ pub struct ChronologicalNoiseSpec {
     /// PAR(0) inflow mean \[m³/s\], shared by both hydros; a negative mean gives
     /// negative draws.
     pub inflow_mean_m3s: f64,
+    /// PAR(1) coefficient per hydro, indexed like `CHRONOLOGICAL_NOISE_HYDRO_IDS`;
+    /// `Some` also makes the inflow lag a state variable and gives the stages
+    /// monthly seasons, so the lag advances.
+    pub par1_psi: Option<[f64; 2]>,
+    /// Inflow non-negativity cost, shared by both hydros.
+    pub inflow_nonnegativity_cost: f64,
 }
 
 impl Default for ChronologicalNoiseSpec {
@@ -1473,15 +1479,41 @@ impl Default for ChronologicalNoiseSpec {
             water_withdrawal_m3s: 0.0,
             inflow_method: CfgInflowMethod::None,
             inflow_mean_m3s: CHRONOLOGICAL_NOISE_INFLOW_MEAN_M3S,
+            par1_psi: None,
+            inflow_nonnegativity_cost: 0.0,
         }
     }
 }
 
-fn chronological_noise_hydro_penalties() -> HydroPenalties {
+/// PAR(1) coefficients of [`negative_draw_par1_spec`], indexed like
+/// `CHRONOLOGICAL_NOISE_HYDRO_IDS`.
+pub const CHRONOLOGICAL_NOISE_PAR1_PSI: [f64; 2] = [0.5, 0.3];
+
+/// The chronological-noise study with negative PAR(1) draws: mean −30 m³/s and
+/// ψ = [`CHRONOLOGICAL_NOISE_PAR1_PSI`] on both hydros, a parallel January stage, a
+/// chronological February stage and three openings per stage.
+///
+/// The lag seed is zero and December has no inflow model, so stage 0 draws
+/// `r₁ = μ + σ·η₁`. February's lag season is January with the same σ, so stage 1
+/// draws `r₂ = μ(1 − ψ) + ψ·r₁ + σ·η₂`: most draws are negative, and stage 1's
+/// correction `max(−r₂, 0)` depends on the trial lag `r₁`.
+#[must_use]
+pub fn negative_draw_par1_spec(method: CfgInflowMethod) -> ChronologicalNoiseSpec {
+    ChronologicalNoiseSpec {
+        block_modes: [BlockMode::Parallel, BlockMode::Chronological],
+        branching_factor: 3,
+        inflow_method: method,
+        inflow_mean_m3s: -30.0,
+        par1_psi: Some(CHRONOLOGICAL_NOISE_PAR1_PSI),
+        ..ChronologicalNoiseSpec::default()
+    }
+}
+
+fn chronological_noise_hydro_penalties(inflow_nonnegativity_cost: f64) -> HydroPenalties {
     HydroPenalties {
         spillage_cost: CHRONOLOGICAL_NOISE_RELEASE_COST,
         turbined_cost: CHRONOLOGICAL_NOISE_RELEASE_COST,
-        inflow_nonnegativity_cost: 0.0,
+        inflow_nonnegativity_cost,
         ..hydro_penalties()
     }
 }
@@ -1521,7 +1553,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
                     generation_model: HydroGenerationModel::ConstantProductivity,
                     specific_productivity_mw_per_m3s_per_m: Some(0.5),
                     max_generation_mw: 250.0,
-                    penalties: chronological_noise_hydro_penalties(),
+                    penalties: chronological_noise_hydro_penalties(spec.inflow_nonnegativity_cost),
                     ..Default::default()
                 },
             )
@@ -1545,12 +1577,12 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
                 StageSpec {
                     start_date: stage_date(i),
                     end_date: stage_date(i + 1),
-                    season_id: Some(0),
+                    season_id: Some(if spec.par1_psi.is_some() { i } else { 0 }),
                     blocks: blocks.clone(),
                     block_mode: spec.block_modes[i],
                     state_config: StageStateConfig {
                         storage: true,
-                        inflow_lags: false,
+                        inflow_lags: spec.par1_psi.is_some(),
                     },
                     risk_config: StageRiskConfig::Expectation,
                     scenario_config: ScenarioSourceConfig {
@@ -1571,7 +1603,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
                 stage_id: i32::try_from(i).expect("stage index fits i32"),
                 mean_m3s: spec.inflow_mean_m3s,
                 std_m3s: CHRONOLOGICAL_NOISE_INFLOW_STD_M3S[h],
-                ar_coefficients: vec![],
+                ar_coefficients: spec.par1_psi.map_or_else(Vec::new, |psi| vec![psi[h]]),
                 residual_std_ratio: 1.0,
                 annual: None,
             })
@@ -1642,7 +1674,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
             n_stages: CHRONOLOGICAL_NOISE_N_STAGES,
         },
         &PenaltiesDefaults {
-            hydro: chronological_noise_hydro_penalties(),
+            hydro: chronological_noise_hydro_penalties(spec.inflow_nonnegativity_cost),
             bus: BusStagePenalties { excess_cost: 0.0 },
             line: LineStagePenalties { exchange_cost: 0.0 },
             ncs: NcsStagePenalties {
@@ -1705,7 +1737,7 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
         pumping_stations.reverse();
     }
 
-    SystemBuilder::new()
+    let builder = SystemBuilder::new()
         .buses(buses)
         .thermals(thermals)
         .pumping_stations(pumping_stations)
@@ -1715,9 +1747,37 @@ fn build_chronological_noise_system(spec: &ChronologicalNoiseSpec) -> novomodelo
         .load_models(load_models)
         .bounds(bounds)
         .penalties(penalties)
-        .initial_conditions(initial_conditions)
+        .initial_conditions(initial_conditions);
+    // Without a season map every lag transition is a no-op, so the outgoing lag
+    // would stay at its zero seed.
+    let builder = if spec.par1_psi.is_some() {
+        builder.policy_graph(HorizonGraph {
+            season_map: Some(monthly_season_map()),
+            ..HorizonGraph::default()
+        })
+    } else {
+        builder
+    };
+    builder
         .build()
         .expect("chronological_noise_study: two independent hydros on a two-stage system")
+}
+
+/// Twelve calendar-month seasons, season id `m − 1` for month `m`.
+fn monthly_season_map() -> SeasonMap {
+    SeasonMap {
+        cycle_type: SeasonCycleType::Monthly,
+        seasons: (0..12)
+            .map(|id| SeasonDefinition {
+                id,
+                label: format!("Month{}", id + 1),
+                month_start: u32::try_from(id + 1).expect("month fits u32"),
+                day_start: None,
+                month_end: None,
+                day_end: None,
+            })
+            .collect(),
+    }
 }
 
 /// Two chronological (default) stages, two blocks each (300 h, 444 h), on two
