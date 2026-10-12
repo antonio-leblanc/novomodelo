@@ -1881,6 +1881,46 @@ pub fn write_backward_opening_outcome_with_inflow_slack_bounds_for_probe<
     )
 }
 
+/// The solved z-inflow primal per hydro (unscaled, canonical hydro order) of `stage`'s
+/// LP loaded, patched and solved at `incoming_state` and `raw_noise` the way a backward
+/// opening is.
+///
+/// # Panics
+///
+/// Panics if `incoming_state.len() != StateSpace::n_state`.
+///
+/// # Errors
+///
+/// Propagates [`SddpError`] from the stage solve.
+pub fn z_inflow_primal_for_probe<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    cut_pool: &CutPool,
+    stage: StageIdx,
+    node_id: NodeId,
+    incoming_state: &[f64],
+    raw_noise: &[f64],
+) -> Result<Vec<f64>, SddpError> {
+    let layout = training_ctx.state;
+    assert_eq!(
+        incoming_state.len(),
+        layout.n_state,
+        "incoming_state must have one entry per state dimension"
+    );
+    let template = ctx.template(stage);
+    ws.solver.reset_solver_state();
+    ws.solver.load_model(template);
+    patch_backward_opening_for_probe(ws, ctx, training_ctx, stage, incoming_state, raw_noise);
+    let col_scale = &template.col_scale;
+    let view = solve_stage_for_probe(ws, ctx, cut_pool, None, stage, 0, node_id)?;
+    Ok(layout
+        .z_inflow
+        .clone()
+        .map(|col| view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0))
+        .collect())
+}
+
 /// The physical (m³/s) inflow-slack bounds the per-solve transform writes for
 /// `incoming_state` and `raw_noise` at `stage`, as `(lower, upper)`; both empty when the
 /// method does not truncate. Touches no LP.
