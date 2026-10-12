@@ -1621,6 +1621,13 @@ mod water_balance_closure {
     /// slack's own price (stage 1 can buy unbounded slack at `c_inf`), so the solve
     /// takes no stage-0 correction; with 200 hm³ stage 0 is short of water itself.
     const PENALTY_SHORT_INITIAL_STORAGE_HM3: f64 = 200.0;
+    /// Warm start at its default, and off. The CLP backend refuses
+    /// `simulation.solver.use_warm_start` at setup, so the "off" setting runs on
+    /// `HiGHS` only.
+    #[cfg(feature = "highs")]
+    const WARM_START_SETTINGS: &[Option<bool>] = &[None, Some(false)];
+    #[cfg(not(feature = "highs"))]
+    const WARM_START_SETTINGS: &[Option<bool>] = &[None];
 
     struct HydroRow {
         stage: i32,
@@ -1813,8 +1820,8 @@ mod water_balance_closure {
     }
 
     /// Every simulated water balance closes from the written `simulation/hydros`
-    /// rows, under every method and with warm start on (default) and off, at one
-    /// tolerance.
+    /// rows, under every method and with warm start on (default) and, on `HiGHS`,
+    /// off, at one tolerance.
     #[test]
     fn simulated_water_balance_closes_from_outputs() {
         let mut table: Vec<String> = Vec::new();
@@ -1828,7 +1835,7 @@ mod water_balance_closure {
             (CfgInflowMethod::Penalty, INITIAL_STORAGE_HM3),
             (CfgInflowMethod::Penalty, PENALTY_SHORT_INITIAL_STORAGE_HM3),
         ] {
-            for warm in [None, Some(false)] {
+            for &warm in WARM_START_SETTINGS {
                 let warm_label = warm.map_or("default".to_string(), |w| w.to_string());
                 let (spec, rows) = simulate_and_read_back(method, initial_storage_hm3, warm);
                 for mode in [BlockMode::Parallel, BlockMode::Chronological] {
