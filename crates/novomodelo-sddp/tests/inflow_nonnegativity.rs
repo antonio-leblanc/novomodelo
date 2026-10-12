@@ -1580,3 +1580,302 @@ mod raw_lag_simulation {
         );
     }
 }
+
+mod water_balance_closure {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use arrow::array::{Array, Float64Array, Int32Array};
+    use arrow::record_batch::RecordBatch;
+    use novomodelo_core::BlockMode;
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, PhaseSolverProfileConfig, SimulationSelection,
+    };
+    use novomodelo_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
+    use novomodelo_sddp::hydro_models::{
+        PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    use super::common::in_code_studies::{
+        CHRONOLOGICAL_NOISE_BLOCK_HOURS, ChronologicalNoiseSpec, chronological_noise_study,
+        negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code_with_models, run_simulation};
+
+    /// hm³ per m³/s per hour.
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const SIMULATION_SCENARIOS: u32 = 20;
+    const TRAINING_ITERATIONS: usize = 3;
+    /// With a unit productivity, a 400 MW load and 600 hm³ of initial storage the
+    /// water is scarce, so its value exceeds `c_inf/0.0036` and the priced
+    /// corrections are used; `none` stays feasible on the study's openings even
+    /// after a full stage-0 release.
+    const PRODUCTIVITY_MW_PER_M3S: f64 = 1.0;
+    const LOAD_MW: f64 = 400.0;
+    const INITIAL_STORAGE_HM3: f64 = 600.0;
+    /// Under `penalty` the 600 hm³ run prices stage-0 water at exactly the penalty
+    /// slack's own price (stage 1 can buy unbounded slack at `c_inf`), so the solve
+    /// takes no stage-0 correction; with 200 hm³ stage 0 is short of water itself.
+    const PENALTY_SHORT_INITIAL_STORAGE_HM3: f64 = 200.0;
+
+    struct HydroRow {
+        stage: i32,
+        block: i32,
+        hydro: i32,
+        scenario: i32,
+        release: f64,
+        z: f64,
+        slack: f64,
+        evaporation: f64,
+        withdrawal_pos: f64,
+        withdrawal_neg: f64,
+        storage_initial: f64,
+        storage_final: f64,
+    }
+
+    fn f64_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a Float64Array {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("simulation/hydros has column {name}"))
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap_or_else(|| panic!("{name} is Float64"))
+    }
+
+    fn i32_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Array {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("simulation/hydros has column {name}"))
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap_or_else(|| panic!("{name} is Int32"))
+    }
+
+    fn read_hydro_rows(dir: &Path, rows: &mut Vec<HydroRow>) {
+        for entry in std::fs::read_dir(dir).expect("readable output directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                read_hydro_rows(&path, rows);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "parquet") {
+                continue;
+            }
+            let file = std::fs::File::open(&path).expect("parquet file opens");
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                .expect("parquet reader")
+                .build()
+                .expect("parquet batches");
+            for batch in reader {
+                let batch = batch.expect("parquet batch");
+                let evaporation = f64_col(&batch, "evaporation_m3s");
+                let block = i32_col(&batch, "block_id");
+                for i in 0..batch.num_rows() {
+                    rows.push(HydroRow {
+                        stage: i32_col(&batch, "stage_id").value(i),
+                        block: if block.is_null(i) { -1 } else { block.value(i) },
+                        hydro: i32_col(&batch, "hydro_id").value(i),
+                        scenario: i32_col(&batch, "scenario_id").value(i),
+                        release: f64_col(&batch, "turbined_m3s").value(i)
+                            + f64_col(&batch, "spillage_m3s").value(i),
+                        z: f64_col(&batch, "incremental_inflow_m3s").value(i),
+                        slack: f64_col(&batch, "inflow_nonnegativity_slack_m3s").value(i),
+                        evaporation: if evaporation.is_null(i) {
+                            0.0
+                        } else {
+                            evaporation.value(i)
+                        },
+                        withdrawal_pos: f64_col(&batch, "water_withdrawal_violation_pos_m3s")
+                            .value(i),
+                        withdrawal_neg: f64_col(&batch, "water_withdrawal_violation_neg_m3s")
+                            .value(i),
+                        storage_initial: f64_col(&batch, "storage_initial_hm3").value(i),
+                        storage_final: f64_col(&batch, "storage_final_hm3").value(i),
+                    });
+                }
+            }
+        }
+    }
+
+    fn simulate_and_read_back(
+        method: CfgInflowMethod,
+        initial_storage_hm3: f64,
+        use_warm_start: Option<bool>,
+    ) -> (ChronologicalNoiseSpec, Vec<HydroRow>) {
+        let spec = ChronologicalNoiseSpec {
+            inflow_nonnegativity_cost: 1.0,
+            load_mean_mw: LOAD_MW,
+            initial_storage_hm3,
+            ..negative_draw_par1_spec(method)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        assert!(
+            system.hydros().iter().all(|h| h.filling.is_none()),
+            "precondition: no hydro short-circuits a filling reservoir into a checked plant"
+        );
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled {
+            num_scenarios: SIMULATION_SCENARIOS,
+        });
+        if let Some(warm) = use_warm_start {
+            let profile: PhaseSolverProfileConfig =
+                serde_json::from_value(serde_json::json!({ "use_warm_start": warm }))
+                    .expect("solver profile deserializes");
+            config.simulation.solver = Some(profile);
+        }
+        let (writer_system, _) = chronological_noise_study(&spec);
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+        let mut hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        hydro_models.production = ProductionModelSet::new(
+            vec![
+                vec![
+                    ResolvedProductionModel::ConstantProductivity {
+                        productivity: PRODUCTIVITY_MW_PER_M3S,
+                    };
+                    n_stages
+                ];
+                system.hydros().len()
+            ],
+            system.hydros(),
+            n_stages,
+        );
+        let mut setup = build_setup_in_code_with_models(system, &config, hydro_models);
+        let results = run_simulation(&mut setup, TRAINING_ITERATIONS);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut writer = SimulationParquetWriter::new(tmp.path(), &writer_system).expect("writer");
+        for scenario in results {
+            writer
+                .write_scenario(ScenarioWritePayload::from(scenario))
+                .expect("write_scenario");
+        }
+        let mut rows = Vec::new();
+        read_hydro_rows(&tmp.path().join("simulation/hydros"), &mut rows);
+        (spec, rows)
+    }
+
+    /// Per (block mode, residual) of one run, from the written outputs only: a
+    /// parallel stage closes `Δv = ζ·(z + slack − e − (W − w⁻ + w⁺)) − Σ_k τ_k·(q_k + s_k)`
+    /// once per (scenario, stage, hydro); a chronological stage closes the same with
+    /// its own `τ_k` and storage pair per block.
+    fn residuals(spec: &ChronologicalNoiseSpec, rows: &[HydroRow]) -> Vec<(BlockMode, f64, f64)> {
+        let tau: Vec<f64> = CHRONOLOGICAL_NOISE_BLOCK_HOURS
+            .iter()
+            .map(|h| h * M3S_TO_HM3)
+            .collect();
+        let zeta: f64 = tau.iter().sum();
+        let withdrawal = |stage: i32, hydro: i32| {
+            if stage == 0 && hydro == 1 {
+                spec.water_withdrawal_m3s
+            } else {
+                0.0
+            }
+        };
+        let mut out = Vec::new();
+        let mut parallel: BTreeMap<(i32, i32, i32), Vec<&HydroRow>> = BTreeMap::new();
+        for row in rows {
+            let mode = spec.block_modes[usize::try_from(row.stage).expect("stage id")];
+            match mode {
+                BlockMode::Parallel => parallel
+                    .entry((row.scenario, row.stage, row.hydro))
+                    .or_default()
+                    .push(row),
+                BlockMode::Chronological => {
+                    let tau_k = tau[usize::try_from(row.block).expect("chronological block id")];
+                    let net = row.z + row.slack
+                        - row.evaporation
+                        - (withdrawal(row.stage, row.hydro) - row.withdrawal_neg
+                            + row.withdrawal_pos)
+                        - row.release;
+                    let res = row.storage_final - row.storage_initial - tau_k * net;
+                    let scale = 1.0_f64.max(row.storage_initial).max(tau_k * row.z.abs());
+                    out.push((mode, res, scale));
+                }
+            }
+        }
+        for ((_, stage, hydro), block_rows) in parallel {
+            let first = block_rows[0];
+            let released: f64 = block_rows
+                .iter()
+                .map(|r| tau[usize::try_from(r.block).expect("parallel block id")] * r.release)
+                .sum();
+            let net = first.z + first.slack
+                - first.evaporation
+                - (withdrawal(stage, hydro) - first.withdrawal_neg + first.withdrawal_pos);
+            let res = first.storage_final - first.storage_initial - (zeta * net - released);
+            let scale = 1.0_f64.max(first.storage_initial).max(zeta * first.z.abs());
+            out.push((BlockMode::Parallel, res, scale));
+        }
+        out
+    }
+
+    /// Every simulated water balance closes from the written `simulation/hydros`
+    /// rows, under every method and with warm start on (default) and off, at one
+    /// tolerance.
+    #[test]
+    fn simulated_water_balance_closes_from_outputs() {
+        let mut table: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut negative_draw: BTreeMap<(String, String), bool> = BTreeMap::new();
+        let mut uses_correction: BTreeMap<(String, String), bool> = BTreeMap::new();
+        for (method, initial_storage_hm3) in [
+            (CfgInflowMethod::None, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Truncation, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::TruncationWithPenalty, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Penalty, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Penalty, PENALTY_SHORT_INITIAL_STORAGE_HM3),
+        ] {
+            for warm in [None, Some(false)] {
+                let warm_label = warm.map_or("default".to_string(), |w| w.to_string());
+                let (spec, rows) = simulate_and_read_back(method, initial_storage_hm3, warm);
+                for mode in [BlockMode::Parallel, BlockMode::Chronological] {
+                    let stages: Vec<i32> = (0..2)
+                        .filter(|&t| spec.block_modes[t] == mode)
+                        .map(|t| i32::try_from(t).expect("stage id"))
+                        .collect();
+                    let mode_rows = || rows.iter().filter(|r| stages.contains(&r.stage));
+                    let key = (format!("{method:?}"), format!("{mode:?}"));
+                    *negative_draw.entry(key.clone()).or_default() |=
+                        mode_rows().any(|r| r.z < 0.0);
+                    *uses_correction.entry(key).or_default() |= mode_rows().any(|r| r.slack > 0.0);
+                }
+                let mut max_by_mode: BTreeMap<String, f64> = BTreeMap::new();
+                for (mode, res, scale) in residuals(&spec, &rows) {
+                    let key = format!("{mode:?}");
+                    let entry = max_by_mode.entry(key.clone()).or_insert(0.0);
+                    *entry = entry.max(res.abs());
+                    if res.abs() > 1e-6 * scale {
+                        failures.push(format!(
+                            "{method:?} v0={initial_storage_hm3} {key} warm_start={warm:?}: residual {res:e} hm3 > 1e-6*{scale}"
+                        ));
+                    }
+                }
+                for (mode, max) in max_by_mode {
+                    table.push(format!(
+                        "{method:?} (v0 {initial_storage_hm3}) | {mode} | {warm_label} | {max:.3e}"
+                    ));
+                }
+            }
+        }
+        eprintln!("max |residual| (hm3) per (method | block mode | warm start):");
+        for line in &table {
+            eprintln!("  {line}");
+        }
+        for ((method, mode), any) in &negative_draw {
+            assert!(*any, "{method} {mode}: vacuity guard: no row with z < 0");
+        }
+        for ((method, mode), any) in &uses_correction {
+            if method != "None" {
+                assert!(
+                    *any,
+                    "{method} {mode}: vacuity guard: no row uses the correction"
+                );
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "water balance does not close:\n{}",
+            failures.join("\n")
+        );
+    }
+}
