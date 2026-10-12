@@ -7834,6 +7834,20 @@ mod pumping_water_tests {
                                 slack_entries.is_empty(),
                                 "{case}: a PreFilling plant at a sink routes its slack nowhere"
                             );
+                        } else {
+                            let expected_rows = match block_mode {
+                                BlockMode::Parallel => 1,
+                                BlockMode::Chronological => stage.blocks.len(),
+                            };
+                            assert!(
+                                !slack_entries.is_empty(),
+                                "{case}: hydro {h} has a destination, so its slack must reach a water row"
+                            );
+                            assert_eq!(
+                                slack_entries.len(),
+                                expected_rows,
+                                "{case}: hydro {h}'s slack lands on one water row per block row"
+                            );
                         }
                     }
                 }
