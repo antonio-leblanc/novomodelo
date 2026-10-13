@@ -2,9 +2,9 @@
 """Project the `.claude/` rule set (single source of truth) onto Kiro's
 `.kiro/steering/*.md`, translating the front-matter dialect.
 
-  CLAUDE.md                     -> 00-hard-rules.md        (inclusion: always)
-  .claude/rules/<name>.md       -> <name>.md               (fileMatch from `paths:`, else always)
-  .claude/architecture-rules.md -> architecture-rules.md   (inclusion: manual)
+  CLAUDE.md                -> 00-hard-rules.md      (always)
+  .claude/rules/<name>.md  -> <name>.md             (fileMatch via paths, else always)
+  .claude/architecture-rules.md -> architecture-rules.md (manual)
 
 Run after editing any `.claude/` rule.
 """
@@ -87,12 +87,7 @@ def kiro_front_matter(source_rel: str, claude_fm: dict, overrides: dict) -> str:
     if paths:
         # fileMatchPattern takes one pattern; brace-join multiple globs.
         pattern = paths[0] if len(paths) == 1 else "{" + ",".join(paths) + "}"
-        return (
-            "---\n"
-            "inclusion: fileMatch\n"
-            f"fileMatchPattern: '{pattern}'\n"
-            "---\n"
-        )
+        return f"---\ninclusion: fileMatch\nfileMatchPattern: '{pattern}'\n---\n"
     return "---\ninclusion: always\n---\n"
 
 
