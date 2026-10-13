@@ -44,6 +44,13 @@ Cobre's.
 - Under the truncation methods, a generic constraint's `hydro_inflow` term counts
   the correction with the inflow, so it reads the water that enters the balance.
   Under `penalty` the slack stays excluded.
+- HiGHS forward and simulation solves are cold by default: `use_warm_start`
+  now defaults to `false` for those phases, so their LPs ignore the stored
+  basis and run presolve. Backward solves still warm-start. Set
+  `"use_warm_start": true` in `training.solver.forward` or `simulation.solver`
+  to restore warm-starting for that phase.
+- HiGHS retry escalation keeps the phase's `use_warm_start` at every retry
+  level; levels 5-11 previously reset it to the solver default.
 
 ### Fixed
 

@@ -910,7 +910,7 @@ mod basis_reconstruct_churn {
     };
     use novomodelo_solver::ActiveSolver;
 
-    use super::common::StubComm;
+    use super::common::{StubComm, enable_forward_warm_start};
 
     // ---------------------------------------------------------------------------
     // Path helpers
@@ -983,6 +983,8 @@ mod basis_reconstruct_churn {
 
         // Budget = 6 = 2 iters × 3 fwd-passes, so eviction first fires after iteration 2.
         config.training.cut_selection.max_active_per_stage = Some(6);
+        // The simplex pin measures forward basis reconstruction, so warm-start it.
+        enable_forward_warm_start(&mut config);
 
         let system = novomodelo_io::load_case(&case_dir).expect("load_case must succeed");
         let prepare_result = prepare_stochastic(
