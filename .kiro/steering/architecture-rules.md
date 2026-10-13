@@ -22,28 +22,29 @@ struct** instead of adding a function parameter.
 
 Available context structs:
 
-| Struct                | File                                             | Purpose                                                                                                                            | Mutability              |
-| --------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| `StageContext`        | `novomodelo-sddp/src/workspace/context.rs`            | Per-stage templates, layout                                                                                             | Immutable (`&`)         |
-| `TrainingContext`     | `novomodelo-sddp/src/workspace/context.rs`            | Horizon, indexer, stochastic, initial state, the runtime node graph                                                                | Immutable (`&`)         |
-| `ScratchBuffers`      | `novomodelo-sddp/src/workspace/workspace.rs`          | Per-worker noise/patch scratch space                                                                                               | Mutable (`&mut`)        |
-| `SolverWorkspace`     | `novomodelo-sddp/src/workspace/workspace.rs`          | Solver + scratch + patch buffer                                                                                                    | Mutable (`&mut`)        |
-| `TrainingConfig`      | `novomodelo-sddp/src/config.rs`                       | Forward passes, iteration limit, seed                                                                                              | Owned (moved in)        |
-| `SimulationConfig`    | `novomodelo-sddp/src/simulation/config.rs`            | Scenario count, channel capacity                                                                                                   | Immutable (`&`)         |
-| `ForwardPassBatch`    | `novomodelo-sddp/src/training/forward/mod.rs`         | Local pass count, iteration, offset                                                                                                | Immutable (`&`)         |
-| `TrainingSession`     | `novomodelo-sddp/src/training/session/mod.rs`         | Owns solver, pools, sub-state structs, scratch                                                                                     | Owned driver            |
-| `BackwardPassState`   | `novomodelo-sddp/src/training/backward_pass_state.rs` | Owned scratch for backward-pass helpers                                                                                            | Mutable (`&mut self`)   |
-| `ForwardPassState`    | `novomodelo-sddp/src/training/forward_pass_state.rs`  | Owned scratch for forward-pass workers                                                                                             | Mutable (`&mut self`)   |
-| `SimulationState`     | `novomodelo-sddp/src/simulation/state.rs`             | Owned scratch for simulation workers                                                                                               | Mutable (`&mut self`)   |
-| `BackwardPassInputs`  | `novomodelo-sddp/src/training/backward_pass_state.rs` | Borrowed inputs to `BackwardPassState::run`                                                                                        | Mutable bundle (`&mut`) |
-| `ForwardPassInputs`   | `novomodelo-sddp/src/training/forward_pass_state.rs`  | Borrowed inputs to `ForwardPassState::run`                                                                                         | Mutable bundle (`&mut`) |
-| `SimulationInputs`    | `novomodelo-sddp/src/simulation/state.rs`             | Borrowed inputs to `SimulationState::run`                                                                                          | Mutable bundle (`&mut`) |
-| `ForwardWorkerParams` | `novomodelo-sddp/src/training/forward_pass_state.rs`  | Read-only captures for rayon workers                                                                                               | Immutable bundle (`&`)  |
-| `ForwardWorkerResult` | `novomodelo-sddp/src/training/forward_pass_state.rs`  | Return bundle from per-worker forward execution                                                                                    | Owned (moved out)       |
-| `OpeningTreeInputs`   | `novomodelo-stochastic/src/tree/generate.rs`          | Optional inputs to `generate_opening_tree`                                                                                         | Immutable bundle (`&`)  |
-| `LbEvalScratch`       | `novomodelo-sddp/src/training/lower_bound.rs`         | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `weights_buf`) with no `ScratchBuffers` counterpart                     | Mutable (`&mut`)        |
-| `LbEvalScratchBundle` | `novomodelo-sddp/src/training/lower_bound.rs`         | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `noise_scratch` (`ScratchBuffers`), `lb_scratch` for `evaluate_lower_bound` | Mutable bundle (`&mut`) |
-| `RiskMeasureScratch`  | `novomodelo-sddp/src/convergence/risk_measure.rs`     | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                    | Mutable (`&mut`)        |
+| Struct                | File                                                   | Purpose                                                                                                                                                                             | Mutability              |
+| --------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| `StageContext`        | `novomodelo-sddp/src/workspace/context.rs`                  | Per-stage templates, layout                                                                                                                                                         | Immutable (`&`)         |
+| `TrainingContext`     | `novomodelo-sddp/src/workspace/context.rs`                  | Horizon, indexer, stochastic, initial state, the runtime node graph                                                                                                                 | Immutable (`&`)         |
+| `ScratchBuffers`      | `novomodelo-sddp/src/workspace/workspace.rs`                | Per-worker noise/patch scratch space                                                                                                                                                | Mutable (`&mut`)        |
+| `SolverWorkspace`     | `novomodelo-sddp/src/workspace/workspace.rs`                | Solver + scratch + patch buffer                                                                                                                                                     | Mutable (`&mut`)        |
+| `TrainingConfig`      | `novomodelo-sddp/src/config.rs`                             | Forward passes, iteration limit, seed                                                                                                                                               | Owned (moved in)        |
+| `SimulationConfig`    | `novomodelo-sddp/src/simulation/config.rs`                  | Scenario count, channel capacity                                                                                                                                                    | Immutable (`&`)         |
+| `ForwardPassBatch`    | `novomodelo-sddp/src/training/forward/mod.rs`               | Local pass count, iteration, offset                                                                                                                                                 | Immutable (`&`)         |
+| `TrainingSession`     | `novomodelo-sddp/src/training/session/mod.rs`               | Owns solver, pools, sub-state structs, scratch                                                                                                                                      | Owned driver            |
+| `BackwardPassState`   | `novomodelo-sddp/src/training/backward_pass_state.rs`       | Owned scratch for backward-pass helpers                                                                                                                                             | Mutable (`&mut self`)   |
+| `ForwardPassState`    | `novomodelo-sddp/src/training/forward_pass_state.rs`        | Owned scratch for forward-pass workers                                                                                                                                              | Mutable (`&mut self`)   |
+| `SimulationState`     | `novomodelo-sddp/src/simulation/state.rs`                   | Owned scratch for simulation workers                                                                                                                                                | Mutable (`&mut self`)   |
+| `BackwardPassInputs`  | `novomodelo-sddp/src/training/backward_pass_state.rs`       | Borrowed inputs to `BackwardPassState::run`                                                                                                                                         | Mutable bundle (`&mut`) |
+| `ForwardPassInputs`   | `novomodelo-sddp/src/training/forward_pass_state.rs`        | Borrowed inputs to `ForwardPassState::run`                                                                                                                                          | Mutable bundle (`&mut`) |
+| `SimulationInputs`    | `novomodelo-sddp/src/simulation/state.rs`                   | Borrowed inputs to `SimulationState::run`                                                                                                                                           | Mutable bundle (`&mut`) |
+| `ForwardWorkerParams` | `novomodelo-sddp/src/training/forward_pass_state.rs`        | Read-only captures for rayon workers                                                                                                                                                | Immutable bundle (`&`)  |
+| `ForwardWorkerResult` | `novomodelo-sddp/src/training/forward_pass_state.rs`        | Return bundle from per-worker forward execution                                                                                                                                     | Owned (moved out)       |
+| `OpeningTreeInputs`   | `novomodelo-stochastic/src/tree/generate.rs`                | Optional inputs to `generate_opening_tree`                                                                                                                                          | Immutable bundle (`&`)  |
+| `LbEvalScratch`       | `novomodelo-sddp/src/training/lower_bound.rs`               | Rank-0 risk-measure aggregation scratch (`objectives_buf`, `weights_buf`, `risk_scratch`) with no `ScratchBuffers` counterpart                                                      | Mutable (`&mut`)        |
+| `LbEvalScratchBundle` | `novomodelo-sddp/src/training/lower_bound.rs`               | Bundles `patch_buf`, `lb_cut_batch`, `lb_cut_row_map`, `noise_scratch` (`ScratchBuffers`), `lb_scratch` for `evaluate_lower_bound`                                                  | Mutable bundle (`&mut`) |
+| `RiskMeasureScratch`  | `novomodelo-sddp/src/convergence/risk_measure.rs`           | CVaR weight-computation scratch (`upper_bounds`, `order`, `mu`)                                                                                                                     | Mutable (`&mut`)        |
+| `NestedUbScratch`     | `novomodelo-sddp/src/training/forward/stats_aggregation.rs` | Nested upper-bound gather layout, gathered costs and recursion buffers (with a `RiskMeasureScratch`), held on the session's `IterationScratch` beside the other upper-bound buffers | Mutable (`&mut`)        |
 
 **Decision tree when adding new data to the hot path:**
 
@@ -137,7 +138,7 @@ duplicates the other's resolution sequence.
 `StudySetup` exposes a small impl surface: context builders (`stage_ctx`,
 `training_ctx`, `simulation_ctx`) are `SolveInputs` methods `StudySetup`
 delegates to unchanged, plus targeted mutation setters (`replace_fcf`,
-`set_start_iteration`, `set_export_states`) and one typed read accessor
+`set_resume_point`, `set_export_states`) and one typed read accessor
 (`simulation_config`). Every other access uses direct field paths
 (`setup.inputs.sub_struct.field` for a `SolveInputs`-held sub-struct,
 `setup.sub_struct.field` otherwise). Do not add accessor methods for plain
@@ -257,9 +258,11 @@ the invariant CLAUDE.md's Python-parity hard rule owns (state the rule, not a
 "currently none missing" snapshot). When adding a new output:
 
 1. The CLI writes it via `write_training_outputs` / `write_simulation_outputs`
-   in `crates/novomodelo-cli/src/commands/run/outputs.rs`.
-2. Wire the same `novomodelo_io` write into the Python path — `run_via_study` /
-   `run_training_phase_py` in `crates/novomodelo-python/src/run.rs` — so both surfaces
-   emit the file. `novomodelo-python` is excluded from the Cargo workspace, so
-   `cargo test --workspace` does not catch a missing mirror; check both paths by
-   hand.
+   in `crates/novomodelo-cli/src/commands/run/outputs.rs`, before the phase's
+   `write_success_marker` call.
+2. Wire the same `novomodelo_io` write into the Python path — `write_training_outputs` /
+   `run_simulation_phase_py` in `crates/novomodelo-python/src/run.rs` — so both
+   surfaces emit the file. `novomodelo-python` is excluded from the Cargo workspace,
+   but `scripts/ci/check_python_parity.py` (also run by
+   `cargo test -p novomodelo-cli --test python_parity_check`) checks that both paths
+   call the same writers and that no write follows the phase marker.
