@@ -317,7 +317,10 @@ pub enum StatsFoldMode {
     /// `"lower_bound"` entries are already cross-rank `allreduce(Sum)` totals
     /// duplicated on every rank, so only `rank == 0` keeps them — otherwise the
     /// caller's `allreduce(Sum)` would multiply them by world_size.
-    MpiRank { rank: u32 },
+    MpiRank {
+        /// This process's MPI rank.
+        rank: u32,
+    },
 }
 
 /// Fold a solver-stats log into the five phase-derived training-summary
@@ -343,8 +346,6 @@ pub fn aggregate_solver_stats_log(
     let mut forward_solve_ms = 0.0_f64;
     let mut backward_solve_ms = 0.0_f64;
     for entry in entries {
-        // backward is rank-partitioned (keep this rank's); forward/lower_bound
-        // are global totals duplicated on every rank (keep only rank 0's).
         let keep = match (my_rank, entry.phase) {
             (None, _) => true,
             (Some(rank), "backward") => entry.rank == rank,
@@ -1162,8 +1163,7 @@ mod tests {
 
     #[test]
     fn aggregate_solver_stats_log_all_ranks_identity_on_one_rank_log() {
-        // On a one-rank log, folding every entry (AllEntries) must equal folding
-        // as rank 0 of a one-rank MPI reduction.
+        // On a one-rank log, AllEntries must equal the rank-0 MpiRank fold.
         let log = vec![
             SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, make_delta(6)),
             SolverStatsLogEntry::from_raw(0, "backward", Some(0), 0, 0, 0, make_delta(3)),
@@ -1177,11 +1177,8 @@ mod tests {
 
     #[test]
     fn aggregate_solver_stats_log_mpi_fold_is_rank_count_invariant() {
-        // Forward/lower_bound entries carry the already-global cross-rank total,
-        // duplicated on every rank; backward entries are rank-partitioned. The
-        // per-rank MpiRank folds, summed across ranks (as the CLI allreduce
-        // does), must reconstruct each phase exactly once — regardless of how
-        // many ranks the backward work was split across.
+        // The per-rank MpiRank folds, summed as the CLI allreduce does, must
+        // reconstruct each phase once regardless of the backward rank split.
         let global_forward = SolverStatsDelta {
             first_try_successes: 100,
             lp_successes: 110,
@@ -1194,7 +1191,7 @@ mod tests {
             ..SolverStatsDelta::default()
         };
 
-        // Reference: a single-rank run. Backward total is 30 first-try, 6 retried.
+        // Backward: 30 first-try, 6 retried (36 - 30).
         let single = vec![
             SolverStatsLogEntry::from_raw(0, "forward", Some(0), -1, 0, -1, global_forward.clone()),
             SolverStatsLogEntry::from_raw(0, "lower_bound", None, -1, 0, -1, global_lb.clone()),
@@ -1215,10 +1212,6 @@ mod tests {
         let (st_ft, st_rt, st_fl, ..) =
             aggregate_solver_stats_log(&single, StatsFoldMode::MpiRank { rank: 0 });
 
-        // Two-rank run: forward/lb duplicated on both ranks (already global,
-        // each stamped with its own rank); backward split 20/10 (first-try) and
-        // 4/2 (retried) by originating rank. Both ranks' logs carry both
-        // backward entries (allgatherv-replicated, stamped by origin).
         let backward_entries = || {
             vec![
                 SolverStatsLogEntry::from_raw(

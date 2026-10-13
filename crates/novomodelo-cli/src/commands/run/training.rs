@@ -115,8 +115,8 @@ pub(super) fn run_training_phase(
     };
     let mut training_output = setup.build_training_output(&training_result, &events);
 
-    // Already global: run_iteration allreduce(Sum)s each iteration's lp_solves
-    // before storing it, so a second allreduce here would multiply by world_size.
+    // Already allreduce(Sum)'d per iteration in run_iteration; a second
+    // allreduce here would multiply the total by world_size.
     let global_lp_solves: u64 = training_output
         .convergence_records
         .iter()
@@ -127,9 +127,8 @@ pub(super) fn run_training_phase(
         message: format!("post-training barrier error: {e}"),
     })?;
 
-    // MpiRank keeps this rank's backward entries plus (only on rank 0) the
-    // forward/lower_bound entries, which are already cross-rank totals; the
-    // allreduce(Sum) below then reassembles each phase exactly once.
+    // Per-rank fold; the allreduce(Sum) below reassembles each phase once
+    // (see StatsFoldMode::MpiRank).
     let my_rank = u32::try_from(ctx.comm.rank()).unwrap_or(u32::MAX);
     let (
         local_first_try,
