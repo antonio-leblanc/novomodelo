@@ -2115,3 +2115,60 @@ fn run_accepts_a_supplied_opening_tree_with_historical_residuals_stages() {
         .stderr(predicate::str::contains("historical windows").not())
         .stderr(predicate::str::contains("V2.").not());
 }
+
+#[cfg(feature = "mpi")]
+mod mpi {
+    use std::process::Command;
+
+    use super::common::mpiexec;
+    use super::*;
+
+    /// The four solve counts of `training/metadata.json` after training
+    /// `examples/1dtoy` for three iterations with two forward passes, so the
+    /// forward and backward work splits across ranks under `launcher`.
+    fn training_solve_counts(launcher: Option<&Path>) -> [u64; 4] {
+        let case = TempDir::new().unwrap();
+        copy_dir_recursive(&case_dir("1dtoy"), case.path());
+        rewrite_json(&case.path().join("config.json"), |config| {
+            config["training"]["selection"]["forward_passes"] = serde_json::json!(2);
+            config["training"]["stopping_rules"] =
+                serde_json::json!([{ "type": "iteration_limit", "limit": 3 }]);
+            config["simulation"]["enabled"] = serde_json::json!(false);
+        });
+        let out = TempDir::new().unwrap();
+        let binary = novomodelo();
+        let mut command = match launcher {
+            Some(launcher) => {
+                let mut command = Command::new(launcher);
+                command.args(["-n", "2"]).arg(binary.get_program());
+                command
+            }
+            None => binary,
+        };
+        command
+            .args(["run", case.path().to_str().unwrap()])
+            .args(["--output", out.path().to_str().unwrap(), "--quiet"])
+            .assert()
+            .success();
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(out.path().join("training/metadata.json")).unwrap(),
+        )
+        .unwrap();
+        ["total_lp_solves", "first_try", "retried", "failed"].map(|key| {
+            metadata["solve_stats"][key]
+                .as_u64()
+                .unwrap_or_else(|| panic!("solve_stats.{key} must be a count: {metadata}"))
+        })
+    }
+
+    #[test]
+    fn training_solve_counts_do_not_scale_with_the_rank_count() {
+        let single = training_solve_counts(None);
+        let two_ranks = training_solve_counts(Some(&mpiexec()));
+
+        assert_eq!(two_ranks, single, "[total, first_try, retried, failed]");
+        let [total, first_try, retried, failed] = two_ranks;
+        assert_eq!(first_try + retried + failed, total);
+    }
+}

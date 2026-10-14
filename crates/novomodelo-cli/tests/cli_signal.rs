@@ -472,8 +472,8 @@ fn sigterm_stop_without_a_configured_simulation_exits_5() {
 #[cfg(feature = "mpi")]
 mod mpi {
     use std::os::unix::ffi::OsStrExt;
-    use std::path::PathBuf;
 
+    use super::common::mpiexec;
     use super::*;
 
     /// The PID of the `rank` process launched with `--output out`.
@@ -499,23 +499,6 @@ mod mpi {
             }
         }
         panic!("no rank {rank} process writes to {}", out.display());
-    }
-
-    fn mpiexec() -> PathBuf {
-        let mpich = PathBuf::from("/opt/mpich/bin/mpiexec");
-        if mpich.is_file() {
-            return mpich;
-        }
-        let on_path = Command::new("mpiexec")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        assert!(
-            on_path.is_ok_and(|status| status.success()),
-            "the MPI signal tests need /opt/mpich/bin/mpiexec or an mpiexec on PATH"
-        );
-        PathBuf::from("mpiexec")
     }
 
     fn assert_graceful_launcher_exit(status: ExitStatus) {
