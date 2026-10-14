@@ -1,9 +1,9 @@
 //! Terminal banner for the `novomodelo` CLI.
 //!
 //! Color output is gated on the resolved `--color` setting (the `console` crate's
-//! global stderr flag, set by `resolve_color`).
+//! global flag for the stream the banner writes to, set by `resolve_color`).
 
-use console::Term;
+use console::{Term, TermTarget};
 
 /// Render the three-line banner as a `String`.
 pub(crate) fn render_banner_string(use_color: bool) -> String {
@@ -28,7 +28,10 @@ pub(crate) fn render_banner_string(use_color: bool) -> String {
 
 /// Write the three-line Novomodelo banner followed by an empty line to `out`.
 pub fn print_banner(out: &Term) {
-    let use_color = console::colors_enabled_stderr();
+    let use_color = match out.target() {
+        TermTarget::Stderr => console::colors_enabled_stderr(),
+        _ => console::colors_enabled(),
+    };
     let banner = render_banner_string(use_color);
     for line in banner.lines() {
         let _ = out.write_line(line);

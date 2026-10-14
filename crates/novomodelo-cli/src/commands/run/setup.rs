@@ -177,10 +177,11 @@ pub(super) fn setup_communicator(
     let is_root = comm.rank() == 0;
     let quiet = args.quiet || !is_root;
 
-    // mpiexec pipes rank 0's stderr without a PTY, so force colors on; console
-    // would otherwise disable them on the non-TTY pipe.
+    // mpiexec pipes rank 0's stdout and stderr without a PTY, so force colors
+    // on; console would otherwise disable them on the non-TTY pipes.
     let mpi_active = comm.size() > 1;
     if mpi_active && is_root && !args.quiet {
+        console::set_colors_enabled(true);
         console::set_colors_enabled_stderr(true);
     }
 
