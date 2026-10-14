@@ -15,6 +15,16 @@ Cobre's.
 
 ## [Unreleased]
 
+### Fixed
+
+- `novomodelo run` under MPI no longer panics when the forward passes do not
+  divide evenly across ranks. A rank holding fewer passes than another could
+  index its stored warm-start bases out of bounds, and the job then hung. Such
+  a run now writes the same outputs as a single-process run.
+- A rank that panics during `novomodelo run` under MPI aborts the whole job
+  with exit code 101. The other ranks used to wait in a collective until the
+  job was killed.
+
 ## [0.18.0] - 2026-10-07
 
 ### Changed
