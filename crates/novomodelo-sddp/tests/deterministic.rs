@@ -15,7 +15,7 @@
     clippy::too_many_lines
 )]
 
-use novomodelo_io::config::SimulationSelection;
+use novomodelo_io::config::{SimulationSelection, StoppingRuleConfig};
 use std::path::Path;
 use std::sync::mpsc;
 
@@ -2269,43 +2269,140 @@ fn incremental_lb_reduces_load_model_count() {
 ///
 /// ## What this tests
 ///
-/// With 2 hydros and PAR(2), the lag state indices are:
-///   - `inflow_lags.start + 0*2 + 0` = hydro 0, lag 0
-///   - `inflow_lags.start + 0*2 + 1` = hydro 0, lag 1  (BUG: was hydro 1, lag 0)
-///   - `inflow_lags.start + 1*2 + 0` = hydro 1, lag 0
-///   - `inflow_lags.start + 1*2 + 1` = hydro 1, lag 1  (BUG: was hydro 0, lag 1)
-///
-/// If the hydro-major/lag-major bug regressed, the wrong lag values would be
-/// used in PAR evaluation, producing a different optimal cost.
+/// The inflow-lag seed reaches the bound through the lag-major lag-state layout
+/// (`StateSpace::lag_state_dim`). Four runs, each trained to `bound_stalling`, are
+/// contrasted: the deck as committed (`real`), an all-zero seed (`zero`), the
+/// committed lag-major seed read hydro-major (`wrong-major`), and the two hydros'
+/// `operational_start_date` swapped (`permuted`), which flips the canonical order
+/// and also hands each hydro the other's opening noise. Both twins must move the
+/// bound; `permuted` must reproduce it to within the noise reassignment, and the
+/// `wrong-major` move must exceed ten times that anchor tolerance.
 #[cfg_attr(
     not(feature = "slow-tests"),
     ignore = "slow: run with --features slow-tests"
 )]
 #[test]
 fn d19_multi_hydro_par_truncation() {
-    let case_dir = Path::new("../../examples/deterministic/d19-multi-hydro-par");
-    let result = run_deterministic(case_dir);
+    let real = train_d19_variant(|_| {});
+    let zero = train_d19_variant(|dir| {
+        edit_json(&dir.join("initial_conditions.json"), |v| {
+            for obs in v["recent_observations"].as_array_mut().unwrap() {
+                obs["value_m3s"] = serde_json::json!(0.0);
+            }
+        });
+    });
+    let wrong_major = train_d19_variant(|dir| {
+        edit_json(&dir.join("initial_conditions.json"), |v| {
+            for obs in v["recent_observations"].as_array_mut().unwrap() {
+                let hydro = obs["hydro_id"].as_i64().unwrap();
+                let december = obs["start_date"].as_str().unwrap() == "2023-12-01";
+                let value = match (hydro, december) {
+                    (0, true) => 50.0,
+                    (0, false) => 30.0,
+                    (1, true) => 45.0,
+                    (_, _) => 28.0,
+                };
+                obs["value_m3s"] = serde_json::json!(value);
+            }
+        });
+    });
+    let permuted = train_d19_variant(|dir| {
+        edit_json(&dir.join("system/hydros.json"), |v| {
+            for hydro in v["hydros"].as_array_mut().unwrap() {
+                let swapped = match hydro["operational_start_date"].as_str().unwrap() {
+                    "2020-01-01" => "2020-01-02",
+                    "2020-01-02" => "2020-01-01",
+                    other => panic!("D19: unexpected operational_start_date {other}"),
+                };
+                hydro["operational_start_date"] = serde_json::json!(swapped);
+            }
+        });
+    });
 
-    // The system with PAR(2) truncation and 2 hydros must produce a positive cost.
+    for (name, run) in [
+        ("real", &real),
+        ("zero", &zero),
+        ("wrong-major", &wrong_major),
+        ("permuted", &permuted),
+    ] {
+        assert_eq!(run.reason, "bound_stalling", "D19 {name}: must converge");
+    }
+    let lb_real = real.final_lb;
     assert!(
-        result.final_lb > 0.0,
-        "D19: lower bound must be positive, got {}",
-        result.final_lb
+        lb_real > 0.0,
+        "D19: lower bound must be positive, got {lb_real}"
     );
-    // No iteration bound: the 2-hydro × 2-lag state space need not converge
-    // within 50 iterations. The LB match is the lag-major indexing regression check.
-    assert_cost(result.final_lb, D19_EXPECTED_COST, 1.0, "D19");
+
+    let twin_threshold = 100.0_f64.max(10.0 * (real.final_gap * lb_real).abs());
+    for (name, twin) in [("zero", &zero), ("wrong-major", &wrong_major)] {
+        let diff = (lb_real - twin.final_lb).abs();
+        assert!(
+            diff > twin_threshold,
+            "D19 {name} twin must move the bound: real {lb_real}, {name} {}, diff {diff}",
+            twin.final_lb
+        );
+    }
+
+    let anchor_tolerance = 1e-3 * lb_real.abs();
+    let anchor_diff = (lb_real - permuted.final_lb).abs();
+    assert!(
+        anchor_diff <= anchor_tolerance,
+        "D19 permuted run must reproduce the bound: real {lb_real}, permuted {}, diff {anchor_diff}",
+        permuted.final_lb
+    );
+    let wrong_major_diff = (lb_real - wrong_major.final_lb).abs();
+    assert!(
+        wrong_major_diff > 10.0 * anchor_tolerance,
+        "D19 power guard: wrong-major diff {wrong_major_diff} must exceed ten times the anchor \
+         tolerance {anchor_tolerance}"
+    );
+
+    for pair in real.lower_bound_history.windows(2) {
+        assert!(
+            pair[1] >= pair[0] - 1e-9 * pair[0].abs(),
+            "D19: the lower-bound history must never decrease: {} -> {}",
+            pair[0],
+            pair[1]
+        );
+    }
 }
 
-/// Expected lower bound for D19 (2-hydro PAR(2) with truncation, 3 stages).
-///
-/// Empirical, not hand-computable (2-hydro × 2-lag state space). D19 is a
-/// 2-hydro AR(2) windowed case whose stage-0 lags reference the pre-study
-/// Nov/Dec 2023 seasons (`stage_id = -1, -2`); the seed `[50, 45, 30, 28]`
-/// (hydro 0 then hydro 1, most-recent-lag-first) produces this cost, while a
-/// zero seed or a wrong-hydro-major seed produces a materially different one
-/// — the hydro-major/lag-major lag-indexing regression guard.
-pub const D19_EXPECTED_COST: f64 = 1_334_568.013_586_834_3;
+/// Train a TempDir copy of D19 after `edit` rewrites its input files, under the
+/// converged rule pair (`iteration_limit` 500 plus `bound_stalling` 5 / `1e-9`).
+fn train_d19_variant(edit: impl FnOnce(&Path)) -> novomodelo_sddp::TrainingResult {
+    let tmp = copy_case_dir(Path::new(
+        "../../examples/deterministic/d19-multi-hydro-par",
+    ));
+    edit(tmp.path());
+    let mut setup = fresh_setup_with(tmp.path(), |config| {
+        config.training.stopping_rules = Some(vec![
+            StoppingRuleConfig::IterationLimit { limit: 500 },
+            StoppingRuleConfig::BoundStalling {
+                iterations: 5,
+                tolerance: 1e-9,
+            },
+        ]);
+    });
+    let comm = StubComm;
+    let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
+    let outcome = setup
+        .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+        .expect("train must return Ok");
+    assert!(outcome.error.is_none(), "expected no training error");
+    outcome.result
+}
+
+/// Rewrite the JSON file at `path` in place through `edit`.
+fn edit_json(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let text = std::fs::read_to_string(path).expect("read JSON input");
+    let mut value: serde_json::Value = serde_json::from_str(&text).expect("parse JSON input");
+    edit(&mut value);
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&value).expect("serialize JSON"),
+    )
+    .expect("write JSON input");
+}
 
 /// Operational violation slacks: 1 hydro with active min_outflow, max_outflow,
 /// min_turbined, and min_generation bounds.
@@ -3688,10 +3785,10 @@ fn d43_storage_only_cut_converges() {
     }
 }
 
-/// D43's stage 0 starts exactly on a month boundary, so the windowed accumulator
-/// seed is inert (`accum = weight = 0.0`, per `derive_inflow_seeds`) and the
-/// windowed cast collapses to the pre-windowing month lookup — an observation-free
-/// case that must reproduce its pre-windowing `final_lb` bit-for-bit. The `to_bits`
+/// Pins D43's `final_lb` bit-for-bit on the golden HiGHS path. D43's stage 0 starts
+/// exactly on a month boundary, so the windowed accumulator seed is inert
+/// (`accum = weight = 0.0`, per `derive_inflow_seeds`) and the windowed cast reduces
+/// to a plain month lookup — an observation-free case. The `to_bits`
 /// golden is HiGHS-only (`#[cfg]`-gated): bit-exactness is backend-specific — CLP's
 /// simplex reaches a different-but-valid vertex — so removing the gate breaks the
 /// CLP suite. D43's `assert_cost` above tolerance-pins the same value for both
@@ -3702,14 +3799,14 @@ fn d43_storage_only_cut_converges() {
     ignore = "slow: run with --features slow-tests"
 )]
 #[test]
-fn test_observation_free_case_bit_exact_pre_epic() {
+fn d43_observation_free_final_lb_is_bit_exact() {
     let case_dir = Path::new("../../examples/deterministic/d43-storage-only-cut");
     let result = run_deterministic(case_dir);
 
     assert_eq!(
         result.final_lb.to_bits(),
         0x4166_3c9e_e81a_8359u64,
-        "D43 final_lb must reproduce its pre-windowing value bit-for-bit: got {} ({:#018x})",
+        "D43 final_lb must match its bit-exact HiGHS pin: got {} ({:#018x})",
         result.final_lb,
         result.final_lb.to_bits()
     );

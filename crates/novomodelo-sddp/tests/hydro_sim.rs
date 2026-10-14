@@ -895,6 +895,130 @@ mod multi_resolution_integration {
             scenario_results.len()
         );
     }
+
+    /// Under `truncation`, the PAR value computed out of the LP at a trial state's
+    /// lags and an opening's noise equals the solved z primal at that state and
+    /// noise, on monthly and quarterly stages.
+    #[test]
+    fn truncation_out_of_lp_par_value_matches_the_z_row() {
+        use novomodelo_sddp::setup::{NodePos, StageIdx};
+        use novomodelo_sddp::test_support::{node_opening_noise, z_inflow_primal_for_probe};
+        use novomodelo_sddp::workspace::StageContext;
+        use novomodelo_stochastic::evaluate_par_batch;
+
+        let case_dir = d30_case_dir();
+        let config = novomodelo_io::parse_config(&case_dir.join("config.json")).expect("config");
+        assert_eq!(
+            config.modeling.inflow_non_negativity.method,
+            novomodelo_io::config::InflowNonNegativityMethod::Truncation,
+            "D30 declares truncation"
+        );
+        let system = novomodelo_io::load_case(&case_dir).expect("load_case D30");
+        let quarterly: Vec<bool> = system
+            .stages()
+            .iter()
+            .filter(|s| s.id >= 0)
+            .map(|s| (s.end_date - s.start_date).num_days() > 62)
+            .collect();
+
+        let mut setup = build_setup(&case_dir, &config);
+        setup.set_export_states(true);
+        let comm = StubComm;
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &comm, 1, ActiveSolver::new, None, None)
+            .expect("train");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let archive = outcome.result.visited_archive.expect("visited archive");
+        let frozen = outcome.result.frozen_templates.expect("frozen templates");
+        let mut pool = setup
+            .create_workspace_pool(&comm, 1, ActiveSolver::new)
+            .expect("workspace pool");
+        let ws = &mut pool.workspaces[0];
+        let training_ctx = setup.training_ctx();
+        let stage_ctx = StageContext {
+            templates: &frozen,
+            ..setup.stage_ctx()
+        };
+        let state = training_ctx.state;
+        let par = setup.inputs.stochastic.par();
+        let tree = training_ctx.stochastic.tree_view();
+        let n_h = state.hydro_count;
+        let n_state = state.n_state;
+        let n_stages = setup.inputs.node_graph.nodes.len();
+        assert_eq!(quarterly.len(), n_stages, "one study stage per chain node");
+
+        for t in 0..n_stages {
+            for h in 0..n_h {
+                assert!(
+                    par.psi_slice(t, h).len() <= state.max_par_order,
+                    "stage {t} hydro {h}: psi_slice longer than the lag state"
+                );
+            }
+        }
+
+        let (mut max_rel, mut checked, mut quarterly_checked) = (0.0_f64, 0usize, 0usize);
+        let (mut strong_lag, mut negative) = (0usize, 0usize);
+        let mut r = vec![0.0; n_h];
+        for (t, &is_quarterly) in quarterly.iter().enumerate().skip(1) {
+            let node_id = setup.inputs.node_graph.node_ids[NodePos(t)];
+            let states = archive.states_for_node(NodePos(t - 1));
+            for x in states.chunks_exact(n_state) {
+                let lags = &x[state.inflow_lags.clone()];
+                for o in 0..tree.n_openings(t) {
+                    let noise = node_opening_noise(&setup, NodePos(t), o);
+                    evaluate_par_batch(par, t, lags, &noise[..n_h], &mut r);
+                    let z = z_inflow_primal_for_probe(
+                        ws,
+                        &stage_ctx,
+                        &training_ctx,
+                        &setup.fcf.pools[t],
+                        StageIdx(t),
+                        node_id,
+                        x,
+                        &noise,
+                    )
+                    .expect("probe solve");
+                    for h in 0..n_h {
+                        let rel = (r[h] - z[h]).abs() / r[h].abs().max(1.0);
+                        max_rel = max_rel.max(rel);
+                        checked += 1;
+                        quarterly_checked += usize::from(is_quarterly);
+                        negative += usize::from(r[h] < 0.0);
+                        let psi = par.psi_slice(t, h);
+                        let lag_term: f64 = psi
+                            .iter()
+                            .enumerate()
+                            .map(|(l, p)| p * lags[l * n_h + h])
+                            .sum();
+                        strong_lag += usize::from(lag_term.abs() > 1.0);
+                        assert!(
+                            rel <= 1e-9,
+                            "stage {t} opening {o} hydro {h}: out-of-LP r = {} vs solved z = {}",
+                            r[h],
+                            z[h]
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "checked={checked} quarterly_checked={quarterly_checked} strong_lag={strong_lag} \
+             negative_r={negative} max_rel_residual={max_rel:e}"
+        );
+        assert!(
+            quarterly_checked > 0,
+            "power guard: no quarterly stage checked"
+        );
+        assert!(
+            strong_lag > 0,
+            "power guard: no (stage, hydro) with |sum psi*lag| > 1"
+        );
+    }
 }
 
 mod sparse_dense {

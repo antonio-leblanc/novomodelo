@@ -125,8 +125,15 @@ and the PAR ψ coefficients price those lag-state dimensions into the Benders cu
 samples. So for AR(p > 0):
 
 - σ > 0 is **unchanged** — the seasonal-stats + AR coefficients define the dynamics
-  and the truncation floor; the external file supplies the realizations, which
+  (and the truncation correction bound); the external file supplies the realizations, which
   round-trip as today. This path is not touched (byte-neutral).
+
+  > **Note (superseded mechanism):** truncation no longer moves η. The PAR value stays
+  > raw, and a per-hydro slack column fixed at the truncation amount `max(−r, 0)`
+  > (capped at it and priced under `truncation_with_penalty`) raises the local inflow
+  > instead (`transform_inflow_noise` and `apply_inflow_slack_col_bounds` in
+  > `novomodelo-sddp` `stochastic/noise.rs`). The external realizations still
+  > round-trip through η unchanged; the correction bound no longer acts on η.
 - σ = 0 is **kept rejected** (decision, §7): a deterministic AR(p > 0) inflow would
   require the external series to follow the exact deterministic PAR recursion at every
   stage — a whole-trajectory constraint of marginal value. The rejection stays; only
@@ -176,7 +183,8 @@ samples. So for AR(p > 0):
   order, preserving the declaration-order-invariance and run-to-run reproducibility
   contracts.
 - The AR(p > 0) σ > 0 inflow path is not modified, so its truncation/state behavior
-  is untouched.
+  is untouched by this record. (Truncation itself has since changed; see the note in
+  §4.3.)
 
 ## 7. Decisions
 

@@ -156,7 +156,7 @@ pub struct HydroWriteRecord {
     pub diverted_inflow_m3s: Option<f64>,
     /// Diverted outflow in m³/s, or `None` if no diversion.
     pub diverted_outflow_m3s: Option<f64>,
-    /// Incremental natural inflow in m³/s.
+    /// Incremental (local) inflow in m³/s: the raw PAR value, which may be negative.
     pub incremental_inflow_m3s: f64,
     /// Incremental (local) natural inflow in m³/s; the same value as
     /// `incremental_inflow_m3s`.
@@ -203,7 +203,8 @@ pub struct HydroWriteRecord {
     pub evaporation_violation_pos_m3s: f64,
     /// Under-evaporation violation in m³/s.
     pub evaporation_violation_neg_m3s: f64,
-    /// Inflow non-negativity slack in m³/s.
+    /// Water added to the incremental inflow in the water balance, in m³/s (the
+    /// non-negativity correction or the penalty slack).
     pub inflow_nonnegativity_slack_m3s: f64,
     /// Over-withdrawal violation in m³/s.
     pub water_withdrawal_violation_pos_m3s: f64,
@@ -362,7 +363,8 @@ pub struct InflowLagWriteRecord {
     pub hydro_id: i32,
     /// Lag index within the AR model (0 = most recent past period).
     pub lag_index: u32,
-    /// Observed inflow at this lag in m³/s.
+    /// Inflow at this lag in m³/s: the history seed at the first stage, the raw
+    /// simulated PAR value afterwards.
     pub inflow_m3s: f64,
 }
 

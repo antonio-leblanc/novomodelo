@@ -591,8 +591,10 @@ fn fill_deficit_and_excess_columns(
     }
 }
 
-/// Inflow non-negativity slack columns (`sigma_inf_h`), one per hydro. Bounds
-/// `[0, +inf)` are the vec default; only the objective is written.
+/// Inflow non-negativity slack columns (`sigma_inf_h`), one per hydro: priced at
+/// `inflow_nonnegativity_cost * total_stage_hours` when the method prices them
+/// (otherwise cost 0); fixed at `[0, 0]` in the template under the truncation
+/// methods, whose bounds are patched per solve.
 fn fill_inflow_slack_columns(
     ctx: &TemplateBuildCtx<'_>,
     stage_idx: usize,
@@ -601,10 +603,16 @@ fn fill_inflow_slack_columns(
     bufs: &mut ColumnBufs<'_>,
 ) {
     if !layout.geometry.inflow_slack.is_empty() {
+        let method = ctx.study_dims.inflow_method;
         for h_idx in 0..layout.state.hydro_count {
             let col = layout.geometry.inflow_slack_col(HydroSys::new(h_idx));
-            let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
-            bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
+            if method.slack_is_priced() {
+                let hp = ctx.resolved.penalties.hydro_penalties(h_idx, stage_idx);
+                bufs.objective[col] = hp.inflow_nonnegativity_cost * total_stage_hours;
+            }
+            if method.truncates() {
+                bufs.col_upper[col] = 0.0;
+            }
         }
     }
 }

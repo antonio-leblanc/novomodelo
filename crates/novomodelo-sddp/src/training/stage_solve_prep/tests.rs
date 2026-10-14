@@ -20,7 +20,7 @@ use novomodelo_solver::{
 use novomodelo_stochastic::StochasticContext;
 use novomodelo_stochastic::context::{ClassSchemes, OpeningTreeInputs, build_stochastic_context};
 
-use super::{InflowNoise, StageSolvePrep, StageSolvePrepParams, StateSource};
+use super::{StageSolvePrep, StageSolvePrepParams, StateSource};
 use crate::{
     context::TrainingContext,
     horizon_mode::HorizonMode,
@@ -40,9 +40,9 @@ use crate::{
 };
 
 /// Single-hydro, single-stage [`StochasticContext`] with a real PAR(0) inflow
-/// model — exercises the `InflowNoise::Transform` path exactly as the forward
-/// site does, rather than vacuously skipping it. `load` additionally declares
-/// a stochastic load-bus noise model on the same bus, when present.
+/// model, so the inflow transform runs as it does at the forward site rather than
+/// vacuously. `load` additionally declares a stochastic load-bus noise model on the
+/// same bus, when present.
 fn make_stochastic_context(load: Option<LoadModel>) -> StochasticContext {
     let bus = Bus {
         id: EntityId(0),
@@ -367,7 +367,6 @@ fn run_matches_open_coded_forward_block_for_minimal_fixture() {
     let mut owner_patch_buf = PatchBuffer::new(&state, &[], &[]);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        inflow_noise: InflowNoise::Transform,
         raw_noise: &raw_noise,
     };
     StageSolvePrep::run(
@@ -572,7 +571,6 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     let sizing = minimal_sizing();
     let params = StageSolvePrepParams {
         state_source: StateSource(&[]),
-        inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
     };
 
@@ -640,14 +638,10 @@ fn run_wires_ncs_patch_matching_pre_collapse_inline_pattern() {
     assert!((upper[0] - expected_upper).abs() < 1e-9);
 }
 
-/// Under `InflowNoise::PreBuilt` — the lower bound's own parameterization —
-/// `StageSolvePrep::run` must skip `transform_inflow_noise` and read
-/// `scratch.z_inflow_rhs_buf` verbatim, even with a real PAR(0) inflow model
-/// `Transform` would otherwise patch. The load patch has no variation point:
-/// it must still reach the load-balance row here, matching a direct
-/// `transform_load_noise` + `fill_load_patches` reference call.
+/// `StageSolvePrep::run` patches the load-balance row and the z-inflow row from
+/// the raw noise, each matching a direct reference call of its own transform.
 #[test]
-fn run_reads_prebuilt_inflow_rhs_verbatim_under_prebuilt() {
+fn run_patches_the_load_row_and_the_z_row_from_the_raw_noise() {
     let state = state_layout(1, 0);
     let stochastic = make_stochastic_context(Some(LoadModel {
         bus_id: EntityId(0),
@@ -687,19 +681,15 @@ fn run_reads_prebuilt_inflow_rhs_verbatim_under_prebuilt() {
     };
 
     let current_state = vec![42.0_f64];
-    // [hydro eta (unread under PreBuilt) | load eta].
+    // [hydro eta | load eta].
     let raw_noise = vec![0.3_f64, 0.4_f64];
     let sizing = minimal_sizing();
     let mut scratch = ScratchBuffers::new(&training_ctx, &ctx, sizing);
-    // Sentinel pre-fill: PreBuilt must leave this untouched, since
-    // transform_inflow_noise clears its target buffer before refilling it.
-    scratch.z_inflow_rhs_buf = vec![222.0];
 
     let mut solver = RecordingSolver::default();
     let mut patch_buf = PatchBuffer::new(&state, &load_bus_indices, &geometry_per_stage);
     let params = StageSolvePrepParams {
         state_source: StateSource(&current_state),
-        inflow_noise: InflowNoise::PreBuilt,
         raw_noise: &raw_noise,
     };
     StageSolvePrep::run(
@@ -712,20 +702,8 @@ fn run_reads_prebuilt_inflow_rhs_verbatim_under_prebuilt() {
         &params,
     );
 
-    assert_eq!(
-        scratch.z_inflow_rhs_buf,
-        vec![222.0],
-        "InflowNoise::PreBuilt must not recompute z_inflow_rhs_buf"
-    );
-    assert_eq!(
-        solver.col_bounds_calls.len(),
-        1,
-        "the state pin still runs under PreBuilt"
-    );
+    assert_eq!(solver.col_bounds_calls.len(), 1, "the state pin runs");
 
-    // Reference: transform_load_noise -> fill_load_patches, called directly —
-    // the load patch is unconditional, so it must match this exactly even
-    // under PreBuilt.
     let mut reference_scratch = ScratchBuffers::new(&training_ctx, &ctx, sizing);
     transform_load_noise(
         &raw_noise,
@@ -744,6 +722,18 @@ fn run_reads_prebuilt_inflow_rhs_verbatim_under_prebuilt() {
         &[0],
         &[],
     );
+    transform_inflow_noise(
+        &raw_noise,
+        StageIdx(0),
+        &current_state,
+        &training_ctx,
+        &mut reference_scratch,
+    );
+    assert!(
+        (reference_scratch.z_inflow_rhs_buf[0] - 109.0).abs() < 1e-12,
+        "PAR(0) with mean 100 and std 30 at eta 0.3 gives 109, got {}",
+        reference_scratch.z_inflow_rhs_buf[0]
+    );
 
     let (indices, lower, upper) = solver
         .row_bounds_calls
@@ -758,7 +748,96 @@ fn run_reads_prebuilt_inflow_rhs_verbatim_under_prebuilt() {
     );
     assert_eq!(
         (lower[1], upper[1]),
-        (222.0, 222.0),
-        "the z-inflow row must read the pre-built sentinel verbatim, not a PAR-transformed value"
+        (
+            reference_scratch.z_inflow_rhs_buf[0],
+            reference_scratch.z_inflow_rhs_buf[0]
+        ),
+        "the z-inflow row must match the direct transform_inflow_noise reference"
     );
+}
+
+/// `StageSolvePrep::run` patches the inflow-slack bounds after the other patches
+/// only under the truncation methods: PAR(0) with mean 100 and std 30 at η = -5
+/// gives `r = -50`, so `TruncationWithPenalty`'s cap is 50 and `Truncation` fixes
+/// the slack at `[50, 50]`; `Penalty` gets no slack patch.
+#[test]
+fn run_patches_the_inflow_slack_bounds_only_under_the_truncation_methods() {
+    let state = state_layout(1, 0);
+    let stochastic = make_stochastic_context(None);
+    let templates = vec![minimal_forward_template()];
+    let state_boxes = vec![unbounded_state_box(state.n_state)];
+    let geometry = vec![StageGeometry {
+        inflow_slack: 4..5,
+        ..equipment_free_geometry(&[1]).remove(0)
+    }];
+    let fixture = StageContextFixture::new(&templates, &state_boxes, &geometry);
+    let ctx = fixture.ctx();
+    let horizon = HorizonMode::Finite { num_stages: 1 };
+    let study_dims = study_dims();
+    let current_state = vec![42.0_f64];
+    let raw_noise = vec![-5.0_f64];
+
+    for (method, expected_calls, expected_last) in [
+        (
+            InflowNonNegativityMethod::TruncationWithPenalty,
+            2,
+            Some((vec![4_usize], vec![0.0_f64], vec![50.0_f64])),
+        ),
+        (
+            InflowNonNegativityMethod::Truncation,
+            2,
+            Some((vec![4], vec![50.0], vec![50.0])),
+        ),
+        (InflowNonNegativityMethod::Penalty, 1, None),
+    ] {
+        let training_ctx = TrainingContext {
+            node_graph: &crate::test_support::chain_node_graph(&stochastic),
+            horizon: &horizon,
+            state: &state,
+            cut_state_layouts: &all_enabled_cut_state_layouts(&state, 1),
+            study_dims: &study_dims,
+            inflow_method: &method,
+            stochastic: &stochastic,
+            initial_state: &[],
+            inflow_scheme: SamplingScheme::InSample,
+            load_scheme: SamplingScheme::InSample,
+            ncs_scheme: SamplingScheme::InSample,
+            stages: &[],
+            historical_library: None,
+            external_inflow_library: None,
+            external_load_library: None,
+            external_ncs_library: None,
+            lag_accum_seed: &[],
+            lag_weight_seed: &[],
+            dcs: None,
+        };
+        let mut scratch = ScratchBuffers::new(&training_ctx, &ctx, minimal_sizing());
+        let mut solver = RecordingSolver::default();
+        let mut patch_buf = PatchBuffer::new(&state, &[], &geometry);
+        let params = StageSolvePrepParams {
+            state_source: StateSource(&current_state),
+            raw_noise: &raw_noise,
+        };
+        StageSolvePrep::run(
+            &mut solver,
+            &mut patch_buf,
+            &mut scratch,
+            &ctx,
+            &training_ctx,
+            StageIdx(0),
+            &params,
+        );
+        assert_eq!(
+            solver.col_bounds_calls.len(),
+            expected_calls,
+            "{method:?}: set_col_bounds call count"
+        );
+        if let Some(expected) = expected_last {
+            assert_eq!(
+                solver.col_bounds_calls.last(),
+                Some(&expected),
+                "{method:?}: the last set_col_bounds is the inflow-slack patch"
+            );
+        }
+    }
 }

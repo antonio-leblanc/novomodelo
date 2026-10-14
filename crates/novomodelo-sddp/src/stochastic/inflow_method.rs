@@ -11,7 +11,10 @@ use novomodelo_io::config::InflowNonNegativityMethod::TruncationWithPenalty;
 /// Inflow non-negativity treatment method.
 ///
 /// The variant must be the same across all stages (set once at solver
-/// initialisation from the loaded case config).
+/// initialisation from the loaded case config). Under either truncation method
+/// the lower bound is not guaranteed to stay below the upper bound, and a `gap`
+/// stopping rule can report convergence that has not occurred (Larroyd et al.
+/// (2022), the paper's §2.5).
 ///
 /// # Examples
 ///
@@ -23,26 +26,23 @@ use novomodelo_io::config::InflowNonNegativityMethod::TruncationWithPenalty;
 ///
 /// let none = InflowNonNegativityMethod::None;
 /// assert!(!none.has_slack_columns());
+///
+/// assert!(InflowNonNegativityMethod::Truncation.has_slack_columns());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InflowNonNegativityMethod {
-    /// No enforcement: no slack columns; a sufficiently negative PAR(p)
-    /// realisation may make the LP infeasible.
+    /// No slack column; a negative inflow realisation can make the LP infeasible.
     None,
 
-    /// Clamps negative PAR(p) inflows to zero by adjusting the noise vector
-    /// before LP patching — no slack columns, no objective perturbation.
+    /// The PAR value `r` stays raw; the slack is fixed per solve at the truncation
+    /// amount `max(−r, 0)`, at cost 0.
     Truncation,
 
-    /// Appends `N` slack columns (`sigma_inf_h >= 0`); each enters hydro `h`'s
-    /// water-balance row with coefficient `tau_total * M3S_TO_HM3`
-    /// (`tau_total` = total stage hours). Objective coefficient from
-    /// `penalties.json → hydro.inflow_nonnegativity_cost` (default 1000.0).
+    /// Slack `[0, ∞)` priced at `inflow_nonnegativity_cost` times the stage hours.
     Penalty,
 
-    /// Both `Truncation` and `Penalty`: the noise is clamped and slack columns
-    /// let the solver undo part of the clamping if cost-effective. Matches
-    /// `SPTcpp`'s `truncamento_penalizacao` mode.
+    /// The PAR value `r` stays raw; the slack is capped per solve at the truncation
+    /// amount `max(−r, 0)` and priced like `Penalty`.
     TruncationWithPenalty,
 }
 
@@ -56,13 +56,23 @@ impl InflowNonNegativityMethod {
     ///
     /// assert!(!InflowNonNegativityMethod::None.has_slack_columns());
     /// assert!(InflowNonNegativityMethod::Penalty.has_slack_columns());
+    /// assert!(InflowNonNegativityMethod::Truncation.has_slack_columns());
     /// ```
     #[must_use]
     pub fn has_slack_columns(&self) -> bool {
-        matches!(
-            self,
-            InflowNonNegativityMethod::Penalty | InflowNonNegativityMethod::TruncationWithPenalty
-        )
+        self.truncates() || self.slack_is_priced()
+    }
+
+    /// Returns `true` for the methods that truncate the local inflow.
+    #[must_use]
+    pub(crate) fn truncates(self) -> bool {
+        matches!(self, Self::Truncation | Self::TruncationWithPenalty)
+    }
+
+    /// Returns `true` for the methods whose slack columns carry a cost.
+    #[must_use]
+    pub(crate) fn slack_is_priced(self) -> bool {
+        matches!(self, Self::Penalty | Self::TruncationWithPenalty)
     }
 }
 
@@ -88,21 +98,25 @@ mod tests {
         InflowNonNegativityConfig, InflowNonNegativityMethod as CfgMethod,
     };
 
-    // ── has_slack_columns ────────────────────────────────────────────────────
-
     #[test]
-    fn none_has_no_slack_columns() {
-        assert!(!InflowNonNegativityMethod::None.has_slack_columns());
-    }
-
-    #[test]
-    fn truncation_has_no_slack_columns() {
-        assert!(!InflowNonNegativityMethod::Truncation.has_slack_columns());
-    }
-
-    #[test]
-    fn penalty_has_slack_columns() {
-        assert!(InflowNonNegativityMethod::Penalty.has_slack_columns());
+    fn predicates_follow_the_method_truth_table() {
+        // (method, has_slack_columns, truncates, slack_is_priced)
+        let table = [
+            (InflowNonNegativityMethod::None, false, false, false),
+            (InflowNonNegativityMethod::Penalty, true, false, true),
+            (InflowNonNegativityMethod::Truncation, true, true, false),
+            (
+                InflowNonNegativityMethod::TruncationWithPenalty,
+                true,
+                true,
+                true,
+            ),
+        ];
+        for (method, slack, truncates, priced) in table {
+            assert_eq!(method.has_slack_columns(), slack, "{method:?}");
+            assert_eq!(method.truncates(), truncates, "{method:?}");
+            assert_eq!(method.slack_is_priced(), priced, "{method:?}");
+        }
     }
 
     // ── conversion from config ───────────────────────────────────────────────
@@ -138,13 +152,6 @@ mod tests {
             InflowNonNegativityMethod::from(&cfg),
             InflowNonNegativityMethod::Truncation
         );
-    }
-
-    // ── TruncationWithPenalty ───────────────────────────────────────────────
-
-    #[test]
-    fn truncation_with_penalty_has_slack_columns() {
-        assert!(InflowNonNegativityMethod::TruncationWithPenalty.has_slack_columns());
     }
 
     #[test]

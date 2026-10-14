@@ -83,14 +83,10 @@ fn state_layout_for(hydro_count: usize, max_par_order: usize) -> StateSpace {
 }
 
 /// External test crate cannot see `test-support`; sets fields directly.
-fn study_dims_for(has_inflow_penalty: bool) -> StudyDimensions {
+fn study_dims_for(method: InflowNonNegativityMethod) -> StudyDimensions {
     StudyDimensions {
         max_deficit_segments: 1,
-        inflow_method: if has_inflow_penalty {
-            InflowNonNegativityMethod::Penalty
-        } else {
-            InflowNonNegativityMethod::None
-        },
+        inflow_method: method,
         anticipated_plants: AnticipatedPlants::default(),
         downstream_par_order: 0,
     }
@@ -103,14 +99,51 @@ fn study_dims_for(has_inflow_penalty: bool) -> StudyDimensions {
 const N_STAGES: usize = 3;
 const N_HYDROS: usize = 2;
 
+/// The fixture's varying axes, shared by both hydros and every stage.
+#[derive(Clone)]
+struct FixtureSpec {
+    mean_m3s: f64,
+    std_m3s: f64,
+    /// Non-empty makes the inflow lag a state variable.
+    ar_coefficients: Vec<f64>,
+    residual_std_ratio: f64,
+    inflow_nonnegativity_cost: f64,
+    /// Incoming inflow lag \[m³/s\] of every hydro in the initial state.
+    initial_lag_m3s: f64,
+    max_storage_hm3: f64,
+    initial_storage_hm3: f64,
+    /// Spillage and turbined unit cost.
+    release_cost: f64,
+}
+
+impl Default for FixtureSpec {
+    fn default() -> Self {
+        Self {
+            mean_m3s: 0.0,
+            std_m3s: 30.0,
+            ar_coefficients: Vec::new(),
+            residual_std_ratio: 1.0,
+            inflow_nonnegativity_cost: 1000.0,
+            initial_lag_m3s: 0.0,
+            max_storage_hm3: 50.0,
+            initial_storage_hm3: 0.0,
+            release_cost: 0.0,
+        }
+    }
+}
+
 fn build_system() -> novomodelo_core::System {
+    build_system_from(&FixtureSpec::default())
+}
+
+fn build_system_from(spec: &FixtureSpec) -> novomodelo_core::System {
     use novomodelo_core::entities::hydro::{HydroGenerationModel, HydroPenalties};
     use novomodelo_core::scenario::InflowModel;
 
     let zero_entity_penalties = HydroPenalties {
-        spillage_cost: 0.0,
+        spillage_cost: spec.release_cost,
         diversion_cost: 0.0,
-        turbined_cost: 0.0,
+        turbined_cost: spec.release_cost,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -123,7 +156,7 @@ fn build_system() -> novomodelo_core::System {
         water_withdrawal_violation_neg_cost: 0.0,
         evaporation_violation_pos_cost: 0.0,
         evaporation_violation_neg_cost: 0.0,
-        inflow_nonnegativity_cost: 1000.0,
+        inflow_nonnegativity_cost: spec.inflow_nonnegativity_cost,
     };
 
     let bus = make_bus(
@@ -151,7 +184,7 @@ fn build_system() -> novomodelo_core::System {
                 entry_stage_id: None,
                 exit_stage_id: None,
                 min_storage_hm3: 0.0,
-                max_storage_hm3: 50.0,
+                max_storage_hm3: spec.max_storage_hm3,
                 min_outflow_m3s: 0.0,
                 max_outflow_m3s: None,
                 generation_model: HydroGenerationModel::ConstantProductivity,
@@ -191,7 +224,7 @@ fn build_system() -> novomodelo_core::System {
                     block_mode: BlockMode::Parallel,
                     state_config: StageStateConfig {
                         storage: true,
-                        inflow_lags: false,
+                        inflow_lags: !spec.ar_coefficients.is_empty(),
                     },
                     risk_config: StageRiskConfig::Expectation,
                     scenario_config: ScenarioSourceConfig {
@@ -210,10 +243,10 @@ fn build_system() -> novomodelo_core::System {
             (0..N_STAGES).map(move |stage_idx| InflowModel {
                 hydro_id,
                 stage_id: stage_idx as i32,
-                mean_m3s: 0.0,
-                std_m3s: 30.0,
-                ar_coefficients: vec![],
-                residual_std_ratio: 1.0,
+                mean_m3s: spec.mean_m3s,
+                std_m3s: spec.std_m3s,
+                ar_coefficients: spec.ar_coefficients.clone(),
+                residual_std_ratio: spec.residual_std_ratio,
                 annual: None,
             })
         })
@@ -247,7 +280,7 @@ fn build_system() -> novomodelo_core::System {
 
     let hydro_bounds_default = HydroStageBounds {
         min_storage_hm3: 0.0,
-        max_storage_hm3: 50.0,
+        max_storage_hm3: spec.max_storage_hm3,
         filling_min_rate_m3s: 0.0,
         water_withdrawal_m3s: 0.0,
     };
@@ -291,9 +324,9 @@ fn build_system() -> novomodelo_core::System {
     );
 
     let hydro_penalties_default = HydroPenalties {
-        spillage_cost: 0.0,
+        spillage_cost: spec.release_cost,
         diversion_cost: 0.0,
-        turbined_cost: 0.0,
+        turbined_cost: spec.release_cost,
         storage_violation_below_cost: 0.0,
         filling_target_violation_cost: 0.0,
         turbined_violation_below_cost: 0.0,
@@ -306,7 +339,7 @@ fn build_system() -> novomodelo_core::System {
         water_withdrawal_violation_neg_cost: 0.0,
         evaporation_violation_pos_cost: 0.0,
         evaporation_violation_neg_cost: 0.0,
-        inflow_nonnegativity_cost: 1000.0,
+        inflow_nonnegativity_cost: spec.inflow_nonnegativity_cost,
     };
     let resolved_penalties = ResolvedPenalties::new(
         &PenaltiesCountsSpec {
@@ -338,10 +371,9 @@ fn build_system() -> novomodelo_core::System {
         .unwrap()
 }
 
-fn build_stochastic() -> StochasticContext {
-    let system = build_system();
+fn build_stochastic(system: &novomodelo_core::System) -> StochasticContext {
     build_stochastic_context(
-        &system,
+        system,
         42,
         None,
         &[],
@@ -381,7 +413,11 @@ fn build_fixture() -> Fixture {
 }
 
 fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixture {
-    let system = build_system();
+    build_fixture_from(&FixtureSpec::default(), inflow_method)
+}
+
+fn build_fixture_from(spec: &FixtureSpec, inflow_method: InflowNonNegativityMethod) -> Fixture {
+    let system = build_system_from(spec);
 
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
@@ -407,13 +443,12 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         &ResolvedParameters::default(),
     )
     .expect("no FPHA plants in integration test fixture");
-    let stochastic = build_stochastic();
+    let stochastic = build_stochastic(&system);
 
     let n_stages = stage_templates.templates.len();
     let n_h = system.hydros().len();
     let max_par_order = par_lp.max_order();
-    let has_inflow_penalty = inflow_method.has_slack_columns() && n_h > 0;
-    let study_dims = study_dims_for(has_inflow_penalty);
+    let study_dims = study_dims_for(inflow_method);
     let geometry = stage_templates
         .geometry_per_stage
         .first()
@@ -421,7 +456,9 @@ fn build_fixture_with_method(inflow_method: InflowNonNegativityMethod) -> Fixtur
         .clone();
 
     let state = state_layout_for(n_h, max_par_order);
-    let initial_state = vec![0.0_f64; state.n_state];
+    let mut initial_state = vec![0.0_f64; state.n_state];
+    initial_state[state.inflow_lags.clone()].fill(spec.initial_lag_m3s);
+    initial_state[state.storage.clone()].fill(spec.initial_storage_hm3);
     let horizon = HorizonMode::Finite {
         num_stages: n_stages,
     };
@@ -470,8 +507,21 @@ fn train_fixture(
     fx: &Fixture,
     iterations: u64,
 ) -> Result<novomodelo_sddp::TrainingOutcome, novomodelo_sddp::SddpError> {
+    let mut fcf = empty_fcf(fx);
+    train_fixture_into(fx, &mut fcf, iterations)
+}
+
+fn empty_fcf(fx: &Fixture) -> FutureCostFunction {
     let n_stages = fx.stage_templates.templates.len();
-    let mut fcf = FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages]);
+    FutureCostFunction::new(n_stages, fx.state.n_state, 1, 20, &vec![0; n_stages])
+}
+
+fn train_fixture_into(
+    fx: &Fixture,
+    fcf: &mut FutureCostFunction,
+    iterations: u64,
+) -> Result<novomodelo_sddp::TrainingOutcome, novomodelo_sddp::SddpError> {
+    let n_stages = fx.stage_templates.templates.len();
     let mut solver = ActiveSolver::new().expect("ActiveSolver::new must succeed");
     let comm = StubComm;
 
@@ -506,7 +556,7 @@ fn train_fixture(
                 export_states: false,
             },
         },
-        &mut fcf,
+        fcf,
         &stage_ctx,
         &TrainingContext {
             node_graph: &novomodelo_sddp::test_support::chain_node_graph(&fx.stochastic),
@@ -716,7 +766,7 @@ fn test_simulation_slack_output_populated() {
     );
 }
 
-/// `TruncationWithPenalty` (clamping + penalty slack) trains end-to-end and the
+/// `TruncationWithPenalty` (raw PAR value, capped and priced slack) trains end-to-end and the
 /// LP template carries inflow slack columns.
 #[test]
 fn truncation_with_penalty_training_completes() {
@@ -745,11 +795,9 @@ fn truncation_with_penalty_training_completes() {
     );
 }
 
-/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 $/(m³/s·h)) produces
-/// distinct inflow-slack objective coefficients in the LP template: H1's equals
-/// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
-#[test]
-fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
+/// The two-hydro system with per-plant `inflow_nonnegativity_cost` H1 = 100 and
+/// H2 = 5000 $/(m³/s·h).
+fn per_plant_penalty_system() -> novomodelo_core::System {
     let hydro_penalties_default = HydroPenalties {
         spillage_cost: 0.0,
         diversion_cost: 0.0,
@@ -792,7 +840,7 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     }
 
     let base_system = build_system();
-    let system = SystemBuilder::new()
+    SystemBuilder::new()
         .buses(base_system.buses().to_vec())
         .hydros(base_system.hydros().to_vec())
         .stages(base_system.stages().to_vec())
@@ -801,9 +849,13 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         .bounds(base_system.bounds().clone())
         .penalties(resolved_penalties)
         .build()
-        .unwrap();
+        .unwrap()
+}
 
-    let inflow_method = InflowNonNegativityMethod::Penalty;
+fn templates_for(
+    system: &novomodelo_core::System,
+    inflow_method: InflowNonNegativityMethod,
+) -> novomodelo_sddp::StageTemplates {
     let par_lp = PrecomputedPar::build(
         system.inflow_models(),
         &system
@@ -816,9 +868,9 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         None,
     )
     .unwrap();
-    let hydro_models = PrepareHydroModelsResult::default_from_system(&system);
-    let templates = build_stage_templates_resolving_layout(
-        &system,
+    let hydro_models = PrepareHydroModelsResult::default_from_system(system);
+    build_stage_templates_resolving_layout(
+        system,
         inflow_method,
         &par_lp,
         &PrecomputedNormal::default(),
@@ -826,7 +878,16 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
         &hydro_models.evaporation,
         &ResolvedParameters::default(),
     )
-    .expect("build_stage_templates_resolving_layout must succeed");
+    .expect("build_stage_templates_resolving_layout must succeed")
+}
+
+/// Per-plant `inflow_nonnegativity_cost` (H1 = 100, H2 = 5000 $/(m³/s·h)) produces
+/// distinct inflow-slack objective coefficients in the LP template: H1's equals
+/// `100 * block_hours`, H2's `5000 * block_hours` (justifies the magic asserts).
+#[test]
+fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
+    let system = per_plant_penalty_system();
+    let templates = templates_for(&system, InflowNonNegativityMethod::Penalty);
 
     let tmpl0 = &templates.templates[0];
     let block_hours = 744.0_f64;
@@ -860,6 +921,60 @@ fn per_plant_inflow_penalty_differentiates_objective_coefficients() {
     );
 }
 
+/// Per method, the inflow-slack family's objective and template bounds: absent under
+/// `None`; priced at `c_h * hours` under `Penalty` and `TruncationWithPenalty`, cost 0
+/// under `Truncation`; bounds `[0, +inf)` under `Penalty`, and `[0, 0]` under the
+/// truncation methods, which patch them per solve.
+#[test]
+fn inflow_slack_objective_and_template_bounds_follow_the_method() {
+    let system = per_plant_penalty_system();
+    let block_hours = 744.0_f64;
+    let cost_scale = 1_000_000.0_f64;
+    let costs = [100.0_f64, 5000.0];
+    for method in [
+        InflowNonNegativityMethod::None,
+        InflowNonNegativityMethod::Penalty,
+        InflowNonNegativityMethod::Truncation,
+        InflowNonNegativityMethod::TruncationWithPenalty,
+    ] {
+        let templates = templates_for(&system, method);
+        let tmpl0 = &templates.templates[0];
+        let slack = &templates.geometry_per_stage[0].inflow_slack;
+        if method == InflowNonNegativityMethod::None {
+            assert!(slack.is_empty(), "{method:?}: no slack family");
+            continue;
+        }
+        assert_eq!(slack.len(), N_HYDROS, "{method:?}");
+        for (h, &c_h) in costs.iter().enumerate() {
+            let col = slack.start + h;
+            let (objective, lower, upper) = (
+                tmpl0.objective[col],
+                tmpl0.col_lower[col],
+                tmpl0.col_upper[col],
+            );
+            if method == InflowNonNegativityMethod::Truncation {
+                assert_eq!(objective, 0.0, "{method:?} hydro {h} objective");
+            } else {
+                let expected = c_h * block_hours / cost_scale;
+                assert!(
+                    (objective - expected).abs() < 1e-6,
+                    "{method:?} hydro {h} objective: expected {expected}, got {objective}"
+                );
+            }
+            let expected_upper = if method == InflowNonNegativityMethod::Penalty {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            assert_eq!(
+                (lower, upper),
+                (0.0, expected_upper),
+                "{method:?} hydro {h} bounds"
+            );
+        }
+    }
+}
+
 /// External test crate cannot see parent's `#[cfg(test)]` surface; mirrors
 /// `test_support::all_enabled_cut_state_layouts` via public API.
 fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<CutStateProjection> {
@@ -870,4 +985,1064 @@ fn all_enabled_cut_state_layouts(global: &StateSpace, n_stages: usize) -> Vec<Cu
     (0..n_stages)
         .map(|_| CutStateProjection::new(global, full))
         .collect()
+}
+
+mod default_method_equivalence {
+    use novomodelo_io::Config;
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::SimulationScenarioResult;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code, run_simulation};
+
+    const TRAINING_ITERATIONS: usize = 3;
+    const SIMULATION_SCENARIOS: u32 = 20;
+    const SCARCE_WATER_LOAD_MW: f64 = 400.0;
+    const SCARCE_WATER_INITIAL_STORAGE_HM3: f64 = 100.0;
+
+    struct RunFingerprint {
+        cut_bits: Vec<Vec<u64>>,
+        simulation_json: String,
+        results: Vec<SimulationScenarioResult>,
+    }
+
+    /// `None` omits the method from the config, so it resolves through the
+    /// deserialization default.
+    fn study_config(method: Option<CfgInflowMethod>) -> (novomodelo_core::System, Config) {
+        let spec = ChronologicalNoiseSpec {
+            load_mean_mw: SCARCE_WATER_LOAD_MW,
+            initial_storage_hm3: SCARCE_WATER_INITIAL_STORAGE_HM3,
+            inflow_nonnegativity_cost: 1.0,
+            ..negative_draw_par1_spec(method.unwrap_or(CfgInflowMethod::None))
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled {
+            num_scenarios: SIMULATION_SCENARIOS,
+        });
+        if method.is_some() {
+            return (system, config);
+        }
+        let mut value = serde_json::to_value(&config).expect("Config serializes");
+        value["modeling"]["inflow_non_negativity"]
+            .as_object_mut()
+            .expect("the study config carries an inflow_non_negativity object")
+            .remove("method")
+            .expect("the study config declares the method explicitly");
+        let omitted =
+            serde_json::from_value(value).expect("Config without the method deserializes");
+        (system, omitted)
+    }
+
+    fn run(method: Option<CfgInflowMethod>) -> RunFingerprint {
+        let (system, config) = study_config(method);
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, TRAINING_ITERATIONS);
+        let cut_bits = setup
+            .fcf
+            .pools
+            .iter()
+            .map(|pool| {
+                pool.active_cuts()
+                    .flat_map(|(slot, intercept, beta)| {
+                        std::iter::once(slot as u64)
+                            .chain(std::iter::once(intercept.to_bits()))
+                            .chain(beta.iter().map(|b| b.to_bits()))
+                    })
+                    .collect()
+            })
+            .collect();
+        let simulation_json =
+            serde_json::to_string(&results).expect("simulation results serialize");
+        RunFingerprint {
+            cut_bits,
+            simulation_json,
+            results,
+        }
+    }
+
+    /// A config that omits the inflow non-negativity method trains and simulates
+    /// bit-for-bit like `truncation_with_penalty` declared explicitly, on a study
+    /// with negative draws and an active correction; `penalty` differs.
+    #[test]
+    fn omitted_method_trains_and_simulates_like_explicit_truncation_with_penalty() {
+        let omitted = run(None);
+        let explicit = run(Some(CfgInflowMethod::TruncationWithPenalty));
+        let penalty = run(Some(CfgInflowMethod::Penalty));
+
+        let hydro_rows = || {
+            explicit
+                .results
+                .iter()
+                .flat_map(|scenario| &scenario.stages)
+                .flat_map(|stage| &stage.hydros)
+        };
+        assert!(
+            hydro_rows().any(|row| row.incremental_inflow_m3s < 0.0),
+            "vacuity guard: no simulated row draws a negative inflow"
+        );
+        assert!(
+            hydro_rows().any(|row| row.inflow_nonnegativity_slack_m3s > 0.0),
+            "vacuity guard: no simulated row uses the inflow correction"
+        );
+        assert!(
+            explicit.cut_bits.iter().any(|pool| !pool.is_empty()),
+            "vacuity guard: training stored no cut"
+        );
+
+        assert_eq!(
+            omitted.cut_bits, explicit.cut_bits,
+            "the omitted method must train the same cuts as explicit truncation_with_penalty"
+        );
+        assert_eq!(
+            omitted.simulation_json, explicit.simulation_json,
+            "the omitted method must simulate like explicit truncation_with_penalty"
+        );
+        assert_ne!(
+            penalty.simulation_json, explicit.simulation_json,
+            "non-degeneracy twin: penalty must simulate differently"
+        );
+    }
+}
+
+mod slack_closed_forms {
+    use novomodelo_sddp::cut::FutureCostFunction;
+    use novomodelo_sddp::inflow_method::InflowNonNegativityMethod;
+    use novomodelo_sddp::setup::NodePos;
+    use novomodelo_sddp::{SimulationHydroResult, SimulationScenarioResult};
+
+    use super::{Fixture, FixtureSpec, N_STAGES, build_fixture_from, empty_fcf, simulate_fixture};
+
+    const COST_SCALE: f64 = 1e6;
+
+    /// Adds to every stage's pool one cut `θ ≥ (2·max(w, 0)·v_max·n − w·Σ_h v_h)/cost_scale`,
+    /// which binds over the whole storage box and prices every hydro's stored water at
+    /// `w` $/hm³ at every stage (a negative `w` makes stored water a burden). Pricing every
+    /// stage, not only the last, keeps the solution independent of training, so of the
+    /// dual vertex a backend picks.
+    fn inject_water_value(
+        fcf: &mut FutureCostFunction,
+        fx: &Fixture,
+        max_storage_hm3: f64,
+        w_per_hm3: f64,
+    ) {
+        let node_ids = novomodelo_sddp::test_support::chain_node_graph(&fx.stochastic).node_ids;
+        let mut coefficients = vec![0.0; fx.state.n_state];
+        for j in fx.state.storage.clone() {
+            coefficients[j] = -w_per_hm3 / COST_SCALE;
+        }
+        let n_hydros = fx.state.storage.len() as f64;
+        let intercept = 2.0 * w_per_hm3.max(0.0) * max_storage_hm3 * n_hydros / COST_SCALE;
+        for stage in 0..N_STAGES {
+            fcf.add_cut(
+                node_ids[NodePos(stage)],
+                stage,
+                0,
+                0,
+                intercept,
+                &coefficients,
+            );
+        }
+    }
+
+    fn records(
+        results: &[SimulationScenarioResult],
+    ) -> impl Iterator<Item = &SimulationHydroResult> {
+        results
+            .iter()
+            .flat_map(|scenario| &scenario.stages)
+            .flat_map(|stage| &stage.hydros)
+    }
+
+    const WATER_VALUE_PER_HM3: f64 = 1000.0;
+    /// `0.0036 · w = 3.6` $/(m³/s·h): the slack is cheaper than stored water below it.
+    const CHEAP_SLACK_COST: f64 = 1.0;
+    const DEAR_SLACK_COST: f64 = 10.0;
+    /// Storage room for every draw: three stages of `ζ·|z|` stay inside `[0, max]`.
+    const ROOMY_MAX_STORAGE_HM3: f64 = 2000.0;
+    const ROOMY_INITIAL_STORAGE_HM3: f64 = 1000.0;
+    /// Above `0.0036·w = 3.6`, so releasing stored water costs more than keeping it.
+    const BURDEN_RELEASE_COST: f64 = 10.0;
+
+    fn tol(z: f64) -> f64 {
+        1e-9 * z.abs().max(1.0)
+    }
+
+    fn truncation_amount(z: f64) -> f64 {
+        (-z).max(0.0)
+    }
+
+    fn simulate_untrained(
+        spec: &FixtureSpec,
+        method: InflowNonNegativityMethod,
+    ) -> Vec<SimulationScenarioResult> {
+        let fx = build_fixture_from(spec, method);
+        simulate_fixture(&fx, &empty_fcf(&fx)).expect("simulate must succeed")
+    }
+
+    /// Simulates the roomy-storage fixture with the water value injected at every
+    /// stage.
+    fn simulate_with_terminal_water_value(
+        method: InflowNonNegativityMethod,
+        inflow_nonnegativity_cost: f64,
+    ) -> Vec<SimulationScenarioResult> {
+        simulate_roomy(
+            method,
+            FixtureSpec {
+                inflow_nonnegativity_cost,
+                ..FixtureSpec::default()
+            },
+            WATER_VALUE_PER_HM3,
+        )
+    }
+
+    fn simulate_roomy(
+        method: InflowNonNegativityMethod,
+        base: FixtureSpec,
+        w_per_hm3: f64,
+    ) -> Vec<SimulationScenarioResult> {
+        let spec = FixtureSpec {
+            max_storage_hm3: ROOMY_MAX_STORAGE_HM3,
+            initial_storage_hm3: ROOMY_INITIAL_STORAGE_HM3,
+            ..base
+        };
+        let fx = build_fixture_from(&spec, method);
+        let mut fcf = empty_fcf(&fx);
+        inject_water_value(&mut fcf, &fx, ROOMY_MAX_STORAGE_HM3, w_per_hm3);
+        simulate_fixture(&fx, &fcf).expect("simulate must succeed")
+    }
+
+    /// The injected cut binds: every terminal record has interior storage and
+    /// prices stored water at `w`.
+    fn assert_terminal_water_value_binds(results: &[SimulationScenarioResult], label: &str) {
+        assert_terminal_water_value_is(results, WATER_VALUE_PER_HM3, label);
+    }
+
+    fn assert_terminal_water_value_is(
+        results: &[SimulationScenarioResult],
+        w_per_hm3: f64,
+        label: &str,
+    ) {
+        let terminal = u32::try_from(N_STAGES - 1).expect("stage index fits u32");
+        let mut terminal_records = 0usize;
+        for r in records(results).filter(|r| r.stage_id == terminal) {
+            terminal_records += 1;
+            assert!(
+                r.storage_final_hm3 > 0.0 && r.storage_final_hm3 < ROOMY_MAX_STORAGE_HM3,
+                "{label}: precondition: terminal storage {} must be interior",
+                r.storage_final_hm3
+            );
+            // The output reports the water-balance dual, which is −w here.
+            assert!(
+                (r.water_value_per_hm3 + w_per_hm3).abs() <= 1e-6 * w_per_hm3.abs(),
+                "{label}: precondition: terminal water value {} must be {}",
+                r.water_value_per_hm3,
+                -w_per_hm3
+            );
+        }
+        assert!(
+            terminal_records > 0,
+            "{label}: precondition: no terminal-stage record"
+        );
+    }
+
+    /// Under `truncation` the correction is fixed at `max(−z, 0)` on every record,
+    /// also where stored water is a burden and releasing it costs, so the solve would
+    /// rather take no correction.
+    #[test]
+    fn truncation_slack_is_fixed_at_the_negated_raw_inflow() {
+        let burden = simulate_roomy(
+            InflowNonNegativityMethod::Truncation,
+            FixtureSpec {
+                release_cost: BURDEN_RELEASE_COST,
+                ..FixtureSpec::default()
+            },
+            -WATER_VALUE_PER_HM3,
+        );
+        assert_terminal_water_value_is(&burden, -WATER_VALUE_PER_HM3, "burden");
+        let terminal = u32::try_from(N_STAGES - 1).expect("stage index fits u32");
+        assert!(
+            records(&burden).any(|r| r.stage_id == terminal && r.incremental_inflow_m3s < -1.0),
+            "burden: vacuity guard: no terminal record with z < −1"
+        );
+        for r in records(&burden) {
+            let z = r.incremental_inflow_m3s;
+            assert!(
+                (r.inflow_nonnegativity_slack_m3s - truncation_amount(z)).abs() <= tol(z),
+                "burden, stage {} hydro {}: slack {} must equal max(−z, 0) for z = {z}",
+                r.stage_id,
+                r.hydro_id,
+                r.inflow_nonnegativity_slack_m3s
+            );
+        }
+
+        let results = simulate_untrained(
+            &FixtureSpec::default(),
+            InflowNonNegativityMethod::Truncation,
+        );
+        assert!(
+            records(&results).any(|r| r.incremental_inflow_m3s < -1.0),
+            "vacuity guard: no record with z < −1"
+        );
+        assert!(
+            records(&results).any(|r| r.incremental_inflow_m3s > 1.0),
+            "vacuity guard: no record with z > 1"
+        );
+        for r in records(&results) {
+            let z = r.incremental_inflow_m3s;
+            assert!(
+                (r.inflow_nonnegativity_slack_m3s - truncation_amount(z)).abs() <= tol(z),
+                "stage {} hydro {}: slack {} must equal max(−z, 0) for z = {z}",
+                r.stage_id,
+                r.hydro_id,
+                r.inflow_nonnegativity_slack_m3s
+            );
+        }
+    }
+
+    /// Under `truncation_with_penalty` the correction never exceeds `max(−z, 0)`; on
+    /// the terminal stage, where stored water is worth `w`, it is the whole amount
+    /// when `c_inf < 0.0036·w` and zero when `c_inf > 0.0036·w`.
+    #[test]
+    fn truncation_with_penalty_slack_is_capped_by_the_truncation_amount() {
+        let terminal = u32::try_from(N_STAGES - 1).expect("stage index fits u32");
+        for (c_inf, takes_the_whole_amount) in [(CHEAP_SLACK_COST, true), (DEAR_SLACK_COST, false)]
+        {
+            let results = simulate_with_terminal_water_value(
+                InflowNonNegativityMethod::TruncationWithPenalty,
+                c_inf,
+            );
+            assert_terminal_water_value_binds(&results, &format!("c_inf {c_inf}"));
+            for r in records(&results) {
+                let z = r.incremental_inflow_m3s;
+                assert!(
+                    r.inflow_nonnegativity_slack_m3s <= truncation_amount(z) + tol(z),
+                    "c_inf {c_inf}, stage {} hydro {}: slack {} exceeds max(−z, 0) for z = {z}",
+                    r.stage_id,
+                    r.hydro_id,
+                    r.inflow_nonnegativity_slack_m3s
+                );
+            }
+            let negative: Vec<_> = records(&results)
+                .filter(|r| r.stage_id == terminal && r.incremental_inflow_m3s < -1.0)
+                .collect();
+            assert!(
+                !negative.is_empty(),
+                "c_inf {c_inf}: vacuity guard: no terminal record with z < −1"
+            );
+            for r in negative {
+                let z = r.incremental_inflow_m3s;
+                let expected = if takes_the_whole_amount {
+                    truncation_amount(z)
+                } else {
+                    0.0
+                };
+                assert!(
+                    (r.inflow_nonnegativity_slack_m3s - expected).abs() <= tol(z),
+                    "c_inf {c_inf}, hydro {}: terminal slack {} must be {expected} for z = {z}",
+                    r.hydro_id,
+                    r.inflow_nonnegativity_slack_m3s
+                );
+            }
+        }
+    }
+
+    /// Under `truncation_with_penalty` a non-negative draw takes no correction even
+    /// when the slack is cheaper than stored water; the unbounded `penalty` slack
+    /// does take water there.
+    #[test]
+    fn truncation_with_penalty_slack_is_zero_for_non_negative_inflow() {
+        let results = simulate_with_terminal_water_value(
+            InflowNonNegativityMethod::TruncationWithPenalty,
+            CHEAP_SLACK_COST,
+        );
+        assert_terminal_water_value_binds(&results, "truncation_with_penalty");
+        let non_negative: Vec<_> = records(&results)
+            .filter(|r| r.incremental_inflow_m3s >= 0.0)
+            .collect();
+        assert!(
+            !non_negative.is_empty(),
+            "vacuity guard: no record with z ≥ 0"
+        );
+        for r in non_negative {
+            assert!(
+                r.inflow_nonnegativity_slack_m3s <= tol(r.incremental_inflow_m3s),
+                "stage {} hydro {}: slack {} must be 0 for z = {}",
+                r.stage_id,
+                r.hydro_id,
+                r.inflow_nonnegativity_slack_m3s,
+                r.incremental_inflow_m3s
+            );
+        }
+
+        let penalty = simulate_with_terminal_water_value(
+            InflowNonNegativityMethod::Penalty,
+            CHEAP_SLACK_COST,
+        );
+        assert!(
+            records(&penalty)
+                .any(|r| r.incremental_inflow_m3s >= 0.0 && r.inflow_nonnegativity_slack_m3s > 1.0),
+            "non-degeneracy twin: the penalty slack must take water on some record with z ≥ 0"
+        );
+    }
+
+    /// With σ = 0 the PAR value is deterministic and `truncation` fixes the
+    /// correction at `−r`: `−μ` for PAR(0), and `−(μ(1 − ψ) + ψ·â)` for an AR(1)
+    /// model with a zero residual ratio and incoming lag `â`.
+    #[test]
+    fn truncation_handles_zero_sigma() {
+        let mean_m3s = -20.0;
+        let par0 = FixtureSpec {
+            mean_m3s,
+            std_m3s: 0.0,
+            ..FixtureSpec::default()
+        };
+        let results = simulate_untrained(&par0, InflowNonNegativityMethod::Truncation);
+        assert!(
+            records(&results).next().is_some(),
+            "PAR(0): no simulated record"
+        );
+        for r in records(&results) {
+            assert!(
+                (r.inflow_nonnegativity_slack_m3s + mean_m3s).abs() <= tol(mean_m3s),
+                "PAR(0) stage {} hydro {}: slack {} must be {}",
+                r.stage_id,
+                r.hydro_id,
+                r.inflow_nonnegativity_slack_m3s,
+                -mean_m3s
+            );
+        }
+
+        let psi = 0.5;
+        let incoming_lag = -10.0;
+        let ar1 = FixtureSpec {
+            mean_m3s,
+            std_m3s: 10.0,
+            ar_coefficients: vec![psi],
+            residual_std_ratio: 0.0,
+            initial_lag_m3s: incoming_lag,
+            ..FixtureSpec::default()
+        };
+        let fx = build_fixture_from(&ar1, InflowNonNegativityMethod::Truncation);
+        let par = fx.stochastic.par();
+        for h in 0..fx.state.storage.len() {
+            assert_eq!(par.psi_slice(0, h), &[psi], "AR(1): ψ = ψ* with one season");
+            assert_eq!(
+                par.sigma(0, h),
+                0.0,
+                "AR(1): σ = std · residual_std_ratio = 0"
+            );
+        }
+        let expected = -(mean_m3s * (1.0 - psi) + psi * incoming_lag);
+        let results = simulate_fixture(&fx, &empty_fcf(&fx)).expect("simulate must succeed");
+        let stage0: Vec<_> = records(&results).filter(|r| r.stage_id == 0).collect();
+        assert!(!stage0.is_empty(), "AR(1): no stage-0 record");
+        for r in stage0 {
+            assert!(
+                (r.inflow_nonnegativity_slack_m3s - expected).abs() <= tol(expected),
+                "AR(1) hydro {}: stage-0 slack {} must be {expected}",
+                r.hydro_id,
+                r.inflow_nonnegativity_slack_m3s
+            );
+        }
+    }
+}
+
+mod raw_lag_continuation {
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::setup::NodePos;
+    use novomodelo_sddp::test_support::node_opening_noise;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code, run_simulation};
+
+    fn tol(x: f64) -> f64 {
+        1e-9 * x.abs().max(1.0)
+    }
+
+    /// Under `truncation` stage 0's raw PAR value `r₁ = b₀ + σ₀·η₀` (zero lag seed),
+    /// negative, is stage 1's incoming lag, and stage 1's z is
+    /// `b₁ + ψ₁·r₁ + σ₁·η₁` with the correction at `max(−z, 0)`; one opening per
+    /// stage makes η known.
+    #[test]
+    fn truncation_keeps_the_raw_par_value_as_the_next_lag() {
+        let spec = ChronologicalNoiseSpec {
+            branching_factor: 1,
+            ..negative_draw_par1_spec(CfgInflowMethod::Truncation)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 1 });
+        let hydro_ids: Vec<i32> = system.hydros().iter().map(|h| h.id.0).collect();
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, 1);
+        let par = setup.inputs.stochastic.par();
+        let eta0 = node_opening_noise(&setup, NodePos(0), 0);
+        let eta1 = node_opening_noise(&setup, NodePos(1), 0);
+        let scenario = results.first().expect("one simulated scenario");
+        let stage = |t: u32| {
+            scenario
+                .stages
+                .iter()
+                .find(|s| s.stage_id == t)
+                .unwrap_or_else(|| panic!("stage {t} is simulated"))
+        };
+
+        let mut any_negative = false;
+        for (h, &id) in hydro_ids.iter().enumerate() {
+            let r1 = par.deterministic_base(0, h) + par.sigma(0, h) * eta0[h];
+            eprintln!("hydro {id}: r1 = {r1} (eta0 = {})", eta0[h]);
+            any_negative |= r1 < -1.0;
+
+            let lag0 = stage(1)
+                .inflow_lags
+                .iter()
+                .find(|l| l.hydro_id == id && l.lag_index == 0)
+                .unwrap_or_else(|| panic!("hydro {id}: stage 1 records its incoming lag 0"));
+            assert!(
+                (lag0.inflow_m3s - r1).abs() <= tol(r1),
+                "hydro {id}: stage 1's incoming lag {} must be the raw r1 = {r1}",
+                lag0.inflow_m3s
+            );
+
+            let psi = par.psi_slice(1, h)[0];
+            let z2 = par.deterministic_base(1, h) + psi * r1 + par.sigma(1, h) * eta1[h];
+            for row in stage(1).hydros.iter().filter(|row| row.hydro_id == id) {
+                assert!(
+                    (row.incremental_inflow_m3s - z2).abs() <= tol(z2),
+                    "hydro {id}: stage 1 z {} must be b + psi*r1 + sigma*eta = {z2}",
+                    row.incremental_inflow_m3s
+                );
+                assert!(
+                    (row.inflow_nonnegativity_slack_m3s - (-z2).max(0.0)).abs() <= tol(z2),
+                    "hydro {id}: stage 1 slack {} must be max(-z, 0) for z = {z2}",
+                    row.inflow_nonnegativity_slack_m3s
+                );
+            }
+        }
+        assert!(
+            any_negative,
+            "precondition: seed 42's single stage-0 opening gives no hydro r1 < -1"
+        );
+    }
+}
+
+mod raw_lag_simulation {
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+
+    use super::common::in_code_studies::{chronological_noise_study, negative_draw_par1_spec};
+    use super::common::{build_setup_in_code, run_simulation};
+
+    /// Under `truncation`, every simulated record's correction is `max(−z, 0)` of its
+    /// own raw z, including stage-1 records whose incoming lag is negative.
+    #[test]
+    fn truncation_simulated_slack_matches_the_negated_inflow_at_raw_lags() {
+        let (system, mut config) =
+            chronological_noise_study(&negative_draw_par1_spec(CfgInflowMethod::Truncation));
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 20 });
+        let mut setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut setup, 3);
+
+        let mut negative_lag_with_slack = 0usize;
+        for stage in results.iter().flat_map(|scenario| &scenario.stages) {
+            for r in &stage.hydros {
+                let z = r.incremental_inflow_m3s;
+                assert!(
+                    (r.inflow_nonnegativity_slack_m3s - (-z).max(0.0)).abs()
+                        <= 1e-9 * z.abs().max(1.0),
+                    "stage {} hydro {}: slack {} must be max(-z, 0) for z = {z}",
+                    stage.stage_id,
+                    r.hydro_id,
+                    r.inflow_nonnegativity_slack_m3s
+                );
+                let negative_incoming_lag = stage
+                    .inflow_lags
+                    .iter()
+                    .any(|l| l.hydro_id == r.hydro_id && l.lag_index == 0 && l.inflow_m3s < 0.0);
+                negative_lag_with_slack += usize::from(
+                    stage.stage_id == 1
+                        && negative_incoming_lag
+                        && r.inflow_nonnegativity_slack_m3s > 1.0,
+                );
+            }
+        }
+        assert!(
+            negative_lag_with_slack > 0,
+            "guard: no stage-1 record with a negative incoming lag and a slack above 1"
+        );
+    }
+}
+
+mod water_balance_closure {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use arrow::array::{Array, Float64Array, Int32Array};
+    use arrow::record_batch::RecordBatch;
+    use novomodelo_core::BlockMode;
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, PhaseSolverProfileConfig, SimulationSelection,
+    };
+    use novomodelo_io::output::simulation_writer::{ScenarioWritePayload, SimulationParquetWriter};
+    use novomodelo_sddp::hydro_models::{
+        PrepareHydroModelsResult, ProductionModelSet, ResolvedProductionModel,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    use super::common::in_code_studies::{
+        CHRONOLOGICAL_NOISE_BLOCK_HOURS, ChronologicalNoiseSpec, chronological_noise_study,
+        negative_draw_par1_spec,
+    };
+    use super::common::{build_setup_in_code_with_models, run_simulation};
+
+    /// hm³ per m³/s per hour.
+    const M3S_TO_HM3: f64 = 3_600.0 / 1_000_000.0;
+    const SIMULATION_SCENARIOS: u32 = 20;
+    const TRAINING_ITERATIONS: usize = 3;
+    /// With a unit productivity, a 400 MW load and 600 hm³ of initial storage the
+    /// water is scarce, so its value exceeds `c_inf/0.0036` and the priced
+    /// corrections are used; `none` stays feasible on the study's openings even
+    /// after a full stage-0 release.
+    const PRODUCTIVITY_MW_PER_M3S: f64 = 1.0;
+    const LOAD_MW: f64 = 400.0;
+    const INITIAL_STORAGE_HM3: f64 = 600.0;
+    /// Under `penalty` the 600 hm³ run prices stage-0 water at exactly the penalty
+    /// slack's own price (stage 1 can buy unbounded slack at `c_inf`), so the solve
+    /// takes no stage-0 correction; with 200 hm³ stage 0 is short of water itself.
+    const PENALTY_SHORT_INITIAL_STORAGE_HM3: f64 = 200.0;
+    /// Warm start at its default, and off. The CLP backend refuses
+    /// `simulation.solver.use_warm_start` at setup, so the "off" setting runs on
+    /// `HiGHS` only.
+    #[cfg(feature = "highs")]
+    const WARM_START_SETTINGS: &[Option<bool>] = &[None, Some(false)];
+    #[cfg(not(feature = "highs"))]
+    const WARM_START_SETTINGS: &[Option<bool>] = &[None];
+
+    struct HydroRow {
+        stage: i32,
+        block: i32,
+        hydro: i32,
+        scenario: i32,
+        release: f64,
+        z: f64,
+        slack: f64,
+        evaporation: f64,
+        withdrawal_pos: f64,
+        withdrawal_neg: f64,
+        storage_initial: f64,
+        storage_final: f64,
+    }
+
+    fn f64_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a Float64Array {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("simulation/hydros has column {name}"))
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap_or_else(|| panic!("{name} is Float64"))
+    }
+
+    fn i32_col<'a>(batch: &'a RecordBatch, name: &str) -> &'a Int32Array {
+        batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("simulation/hydros has column {name}"))
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap_or_else(|| panic!("{name} is Int32"))
+    }
+
+    fn read_hydro_rows(dir: &Path, rows: &mut Vec<HydroRow>) {
+        for entry in std::fs::read_dir(dir).expect("readable output directory") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                read_hydro_rows(&path, rows);
+                continue;
+            }
+            if path.extension().is_none_or(|e| e != "parquet") {
+                continue;
+            }
+            let file = std::fs::File::open(&path).expect("parquet file opens");
+            let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                .expect("parquet reader")
+                .build()
+                .expect("parquet batches");
+            for batch in reader {
+                let batch = batch.expect("parquet batch");
+                let evaporation = f64_col(&batch, "evaporation_m3s");
+                let block = i32_col(&batch, "block_id");
+                for i in 0..batch.num_rows() {
+                    rows.push(HydroRow {
+                        stage: i32_col(&batch, "stage_id").value(i),
+                        block: if block.is_null(i) { -1 } else { block.value(i) },
+                        hydro: i32_col(&batch, "hydro_id").value(i),
+                        scenario: i32_col(&batch, "scenario_id").value(i),
+                        release: f64_col(&batch, "turbined_m3s").value(i)
+                            + f64_col(&batch, "spillage_m3s").value(i),
+                        z: f64_col(&batch, "incremental_inflow_m3s").value(i),
+                        slack: f64_col(&batch, "inflow_nonnegativity_slack_m3s").value(i),
+                        evaporation: if evaporation.is_null(i) {
+                            0.0
+                        } else {
+                            evaporation.value(i)
+                        },
+                        withdrawal_pos: f64_col(&batch, "water_withdrawal_violation_pos_m3s")
+                            .value(i),
+                        withdrawal_neg: f64_col(&batch, "water_withdrawal_violation_neg_m3s")
+                            .value(i),
+                        storage_initial: f64_col(&batch, "storage_initial_hm3").value(i),
+                        storage_final: f64_col(&batch, "storage_final_hm3").value(i),
+                    });
+                }
+            }
+        }
+    }
+
+    fn simulate_and_read_back(
+        method: CfgInflowMethod,
+        initial_storage_hm3: f64,
+        use_warm_start: Option<bool>,
+    ) -> (ChronologicalNoiseSpec, Vec<HydroRow>) {
+        let spec = ChronologicalNoiseSpec {
+            inflow_nonnegativity_cost: 1.0,
+            load_mean_mw: LOAD_MW,
+            initial_storage_hm3,
+            ..negative_draw_par1_spec(method)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        assert!(
+            system.hydros().iter().all(|h| h.filling.is_none()),
+            "precondition: no hydro short-circuits a filling reservoir into a checked plant"
+        );
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled {
+            num_scenarios: SIMULATION_SCENARIOS,
+        });
+        if let Some(warm) = use_warm_start {
+            let profile: PhaseSolverProfileConfig =
+                serde_json::from_value(serde_json::json!({ "use_warm_start": warm }))
+                    .expect("solver profile deserializes");
+            config.simulation.solver = Some(profile);
+        }
+        let (writer_system, _) = chronological_noise_study(&spec);
+        let n_stages = system.stages().iter().filter(|s| s.id >= 0).count();
+        let mut hydro_models = PrepareHydroModelsResult::default_from_system(&system);
+        hydro_models.production = ProductionModelSet::new(
+            vec![
+                vec![
+                    ResolvedProductionModel::ConstantProductivity {
+                        productivity: PRODUCTIVITY_MW_PER_M3S,
+                    };
+                    n_stages
+                ];
+                system.hydros().len()
+            ],
+            system.hydros(),
+            n_stages,
+        );
+        let mut setup = build_setup_in_code_with_models(system, &config, hydro_models);
+        let results = run_simulation(&mut setup, TRAINING_ITERATIONS);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut writer = SimulationParquetWriter::new(tmp.path(), &writer_system).expect("writer");
+        for scenario in results {
+            writer
+                .write_scenario(ScenarioWritePayload::from(scenario))
+                .expect("write_scenario");
+        }
+        let mut rows = Vec::new();
+        read_hydro_rows(&tmp.path().join("simulation/hydros"), &mut rows);
+        (spec, rows)
+    }
+
+    /// Per (block mode, residual) of one run, from the written outputs only: a
+    /// parallel stage closes `Δv = ζ·(z + slack − e − (W − w⁻ + w⁺)) − Σ_k τ_k·(q_k + s_k)`
+    /// once per (scenario, stage, hydro); a chronological stage closes the same with
+    /// its own `τ_k` and storage pair per block.
+    fn residuals(spec: &ChronologicalNoiseSpec, rows: &[HydroRow]) -> Vec<(BlockMode, f64, f64)> {
+        let tau: Vec<f64> = CHRONOLOGICAL_NOISE_BLOCK_HOURS
+            .iter()
+            .map(|h| h * M3S_TO_HM3)
+            .collect();
+        let zeta: f64 = tau.iter().sum();
+        let withdrawal = |stage: i32, hydro: i32| {
+            if stage == 0 && hydro == 1 {
+                spec.water_withdrawal_m3s
+            } else {
+                0.0
+            }
+        };
+        let mut out = Vec::new();
+        let mut parallel: BTreeMap<(i32, i32, i32), Vec<&HydroRow>> = BTreeMap::new();
+        for row in rows {
+            let mode = spec.block_modes[usize::try_from(row.stage).expect("stage id")];
+            match mode {
+                BlockMode::Parallel => parallel
+                    .entry((row.scenario, row.stage, row.hydro))
+                    .or_default()
+                    .push(row),
+                BlockMode::Chronological => {
+                    let tau_k = tau[usize::try_from(row.block).expect("chronological block id")];
+                    let net = row.z + row.slack
+                        - row.evaporation
+                        - (withdrawal(row.stage, row.hydro) - row.withdrawal_neg
+                            + row.withdrawal_pos)
+                        - row.release;
+                    let res = row.storage_final - row.storage_initial - tau_k * net;
+                    let scale = 1.0_f64.max(row.storage_initial).max(tau_k * row.z.abs());
+                    out.push((mode, res, scale));
+                }
+            }
+        }
+        for ((_, stage, hydro), block_rows) in parallel {
+            let first = block_rows[0];
+            let released: f64 = block_rows
+                .iter()
+                .map(|r| tau[usize::try_from(r.block).expect("parallel block id")] * r.release)
+                .sum();
+            let net = first.z + first.slack
+                - first.evaporation
+                - (withdrawal(stage, hydro) - first.withdrawal_neg + first.withdrawal_pos);
+            let res = first.storage_final - first.storage_initial - (zeta * net - released);
+            let scale = 1.0_f64.max(first.storage_initial).max(zeta * first.z.abs());
+            out.push((BlockMode::Parallel, res, scale));
+        }
+        out
+    }
+
+    /// Every simulated water balance closes from the written `simulation/hydros`
+    /// rows, under every method and with warm start on (default) and, on `HiGHS`,
+    /// off, at one tolerance.
+    #[test]
+    fn simulated_water_balance_closes_from_outputs() {
+        let mut table: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        let mut negative_draw: BTreeMap<(String, String), bool> = BTreeMap::new();
+        let mut uses_correction: BTreeMap<(String, String), bool> = BTreeMap::new();
+        for (method, initial_storage_hm3) in [
+            (CfgInflowMethod::None, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Truncation, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::TruncationWithPenalty, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Penalty, INITIAL_STORAGE_HM3),
+            (CfgInflowMethod::Penalty, PENALTY_SHORT_INITIAL_STORAGE_HM3),
+        ] {
+            for &warm in WARM_START_SETTINGS {
+                let warm_label = warm.map_or("default".to_string(), |w| w.to_string());
+                let (spec, rows) = simulate_and_read_back(method, initial_storage_hm3, warm);
+                for mode in [BlockMode::Parallel, BlockMode::Chronological] {
+                    let stages: Vec<i32> = (0..2)
+                        .filter(|&t| spec.block_modes[t] == mode)
+                        .map(|t| i32::try_from(t).expect("stage id"))
+                        .collect();
+                    let mode_rows = || rows.iter().filter(|r| stages.contains(&r.stage));
+                    let key = (format!("{method:?}"), format!("{mode:?}"));
+                    *negative_draw.entry(key.clone()).or_default() |=
+                        mode_rows().any(|r| r.z < 0.0);
+                    *uses_correction.entry(key).or_default() |= mode_rows().any(|r| r.slack > 0.0);
+                }
+                let mut max_by_mode: BTreeMap<String, f64> = BTreeMap::new();
+                for (mode, res, scale) in residuals(&spec, &rows) {
+                    let key = format!("{mode:?}");
+                    let entry = max_by_mode.entry(key.clone()).or_insert(0.0);
+                    *entry = entry.max(res.abs());
+                    if res.abs() > 1e-6 * scale {
+                        failures.push(format!(
+                            "{method:?} v0={initial_storage_hm3} {key} warm_start={warm:?}: residual {res:e} hm3 > 1e-6*{scale}"
+                        ));
+                    }
+                }
+                for (mode, max) in max_by_mode {
+                    table.push(format!(
+                        "{method:?} (v0 {initial_storage_hm3}) | {mode} | {warm_label} | {max:.3e}"
+                    ));
+                }
+            }
+        }
+        eprintln!("max |residual| (hm3) per (method | block mode | warm start):");
+        for line in &table {
+            eprintln!("  {line}");
+        }
+        for ((method, mode), any) in &negative_draw {
+            assert!(*any, "{method} {mode}: vacuity guard: no row with z < 0");
+        }
+        for ((method, mode), any) in &uses_correction {
+            if method != "None" {
+                assert!(
+                    *any,
+                    "{method} {mode}: vacuity guard: no row uses the correction"
+                );
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "water balance does not close:\n{}",
+            failures.join("\n")
+        );
+    }
+}
+
+mod truncation_order_invariance {
+    use std::collections::BTreeMap;
+
+    use novomodelo_io::config::{
+        InflowNonNegativityMethod as CfgInflowMethod, SimulationSelection,
+    };
+    use novomodelo_sddp::setup::{NodePos, StageIdx};
+    use novomodelo_sddp::test_support::{inflow_slack_bounds_for_probe, node_opening_noise};
+    use novomodelo_solver::ActiveSolver;
+
+    use super::common::in_code_studies::{
+        ChronologicalNoiseSpec, chronological_noise_study, negative_draw_par1_spec,
+    };
+    use super::common::{StubComm, build_setup_in_code, run_simulation};
+
+    /// Per (scenario, stage, block, hydro id): slack, z and incoming lag-0 bits;
+    /// per (stage, archived state, opening, hydro id): the probe's slack bound bits.
+    struct Fingerprint {
+        records: BTreeMap<(u32, u32, Option<u32>, i32), [u64; 3]>,
+        bounds: BTreeMap<(usize, usize, usize, i32), [u64; 2]>,
+        max_bound: f64,
+        min_lag: f64,
+        max_lstar_gap: f64,
+    }
+
+    fn run(reverse_declaration_order: bool) -> Fingerprint {
+        let spec = ChronologicalNoiseSpec {
+            reverse_declaration_order,
+            ..negative_draw_par1_spec(CfgInflowMethod::Truncation)
+        };
+        let (system, mut config) = chronological_noise_study(&spec);
+        config.simulation.enabled = true;
+        config.simulation.selection = Some(SimulationSelection::Sampled { num_scenarios: 20 });
+        let mut hydro_ids: Vec<i32> = system.hydros().iter().map(|h| h.id.0).collect();
+        hydro_ids.sort_unstable();
+
+        let mut setup = build_setup_in_code(system, &config);
+        setup.set_export_states(true);
+        let mut solver = ActiveSolver::new().expect("ActiveSolver::new");
+        let outcome = setup
+            .train(&mut solver, &StubComm, 1, ActiveSolver::new, None, None)
+            .expect("training");
+        assert!(
+            outcome.error.is_none(),
+            "training error: {:?}",
+            outcome.error
+        );
+        let archive = outcome.result.visited_archive.expect("visited archive");
+
+        let mut pool = setup
+            .create_workspace_pool(&StubComm, 1, ActiveSolver::new)
+            .expect("workspace pool");
+        let ws = &mut pool.workspaces[0];
+        let training_ctx = setup.training_ctx();
+        let n_state = training_ctx.state.n_state;
+        let mut bounds = BTreeMap::new();
+        let (mut max_bound, mut max_lstar_gap) = (0.0_f64, 0.0_f64);
+        let n_stages = setup.inputs.node_graph.nodes.len();
+        for stage in 1..n_stages {
+            let n_openings = setup.inputs.node_graph.nodes[NodePos(stage)].openings.len;
+            for (k, x) in archive
+                .states_for_node(NodePos(stage - 1))
+                .chunks_exact(n_state)
+                .enumerate()
+            {
+                for o in 0..n_openings {
+                    let noise = node_opening_noise(&setup, NodePos(stage), o);
+                    let (lower, upper) = inflow_slack_bounds_for_probe(
+                        ws,
+                        &training_ctx,
+                        StageIdx(stage),
+                        x,
+                        &noise,
+                    );
+                    for (h, &id) in hydro_ids.iter().enumerate() {
+                        bounds.insert((stage, k, o, id), [lower[h].to_bits(), upper[h].to_bits()]);
+                        max_bound = max_bound.max(upper[h]);
+                    }
+                    max_lstar_gap = max_lstar_gap.max((upper[0] - upper[1]).abs());
+                }
+            }
+        }
+
+        let (system, _) = chronological_noise_study(&spec);
+        let mut simulation_setup = build_setup_in_code(system, &config);
+        let results = run_simulation(&mut simulation_setup, 1);
+        let mut records = BTreeMap::new();
+        let mut min_lag = f64::INFINITY;
+        for scenario in &results {
+            for stage in &scenario.stages {
+                for r in &stage.hydros {
+                    let lag = stage
+                        .inflow_lags
+                        .iter()
+                        .find(|l| l.hydro_id == r.hydro_id && l.lag_index == 0)
+                        .map_or(0.0, |l| l.inflow_m3s);
+                    min_lag = min_lag.min(lag);
+                    records.insert(
+                        (scenario.scenario_id, stage.stage_id, r.block_id, r.hydro_id),
+                        [
+                            r.inflow_nonnegativity_slack_m3s.to_bits(),
+                            r.incremental_inflow_m3s.to_bits(),
+                            lag.to_bits(),
+                        ],
+                    );
+                }
+            }
+        }
+        Fingerprint {
+            records,
+            bounds,
+            max_bound,
+            min_lag,
+            max_lstar_gap,
+        }
+    }
+
+    /// Under `truncation`, the per-solve correction, the raw z and the incoming
+    /// lags of every simulated record, and the slack bounds at every archived trial
+    /// state, are bit-identical with the entity declaration order reversed, keyed by
+    /// hydro id; ψ and σ differ between the hydros, so a positional mix-up moves them.
+    #[test]
+    fn truncation_lag_sequence_is_order_invariant() {
+        let base = run(false);
+        let repeat = run(false);
+        let reversed = run(true);
+
+        assert!(base.max_bound > 0.0, "guard: no positive slack bound");
+        assert!(base.min_lag < 0.0, "guard: no negative incoming lag");
+        assert!(
+            base.max_lstar_gap > 1.0,
+            "guard: the two hydros' l* never differ by more than 1"
+        );
+        assert!(
+            !base.records.is_empty() && !base.bounds.is_empty(),
+            "guard: nothing compared"
+        );
+
+        assert!(
+            base.records == repeat.records,
+            "simulation records differ between two fresh runs"
+        );
+        assert!(
+            base.bounds == repeat.bounds,
+            "slack bounds differ between two fresh runs"
+        );
+        assert!(
+            base.records == reversed.records,
+            "simulation records differ under declaration-order reversal"
+        );
+        assert!(
+            base.bounds == reversed.bounds,
+            "slack bounds differ under declaration-order reversal"
+        );
+    }
 }

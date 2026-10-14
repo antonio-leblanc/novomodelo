@@ -631,7 +631,7 @@ mod tests {
         assert!(cfg.training.enabled);
         assert_eq!(
             cfg.modeling.inflow_non_negativity.method,
-            InflowNonNegativityMethod::Penalty
+            InflowNonNegativityMethod::TruncationWithPenalty
         );
         assert!(!cfg.simulation.enabled);
         assert_eq!(

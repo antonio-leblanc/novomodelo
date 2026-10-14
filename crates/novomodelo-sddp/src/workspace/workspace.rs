@@ -610,8 +610,6 @@ pub struct ScratchBuffers {
     pub(crate) inflow_m3s_buf: Vec<f64>,
     pub(crate) lag_matrix_buf: Vec<f64>,
     pub(crate) par_inflow_buf: Vec<f64>,
-    pub(crate) eta_floor_buf: Vec<f64>,
-    pub(crate) zero_targets_buf: Vec<f64>,
     pub(crate) ncs_col_upper_buf: Vec<f64>,
     pub(crate) ncs_col_lower_buf: Vec<f64>,
     pub(crate) ncs_col_indices_buf: Vec<usize>,
@@ -639,10 +637,21 @@ pub struct ScratchBuffers {
     // `ncs_col_upper_buf`. `ncs_col_upper_buf` (slot order) cannot be consumed
     // directly because extraction indexes by active-local column.
     pub(crate) ncs_col_upper_extract_buf: Vec<f64>,
+    /// Per-hydro inflow-slack bounds in physical m³/s, written by
+    /// `transform_inflow_noise` under the truncation methods; the patch divides
+    /// them by `col_scale` into the `_scaled` buffers.
+    pub(crate) inflow_slack_lower_buf: Vec<f64>,
+    pub(crate) inflow_slack_upper_buf: Vec<f64>,
+    pub(crate) inflow_slack_col_indices_buf: Vec<usize>,
+    pub(crate) inflow_slack_col_lower_scaled_buf: Vec<f64>,
+    pub(crate) inflow_slack_col_upper_scaled_buf: Vec<f64>,
+    /// Inflow-slack column start `inflow_slack_col_indices_buf` was last built
+    /// for; `usize::MAX` initially. Keyed on the start, never the length, which
+    /// is always `hydro_count`.
+    pub(crate) last_inflow_slack_col_start: usize,
     pub(crate) load_rhs_buf: Vec<f64>,
     pub(crate) row_lower_buf: Vec<f64>,
     pub(crate) z_inflow_rhs_buf: Vec<f64>,
-    pub(crate) effective_eta_buf: Vec<f64>,
     pub(crate) unscaled_primal: Vec<f64>,
     pub(crate) unscaled_dual: Vec<f64>,
     pub(crate) lag_accumulator: Vec<f64>,
@@ -790,8 +799,6 @@ impl ScratchBuffers {
             inflow_m3s_buf: Vec::with_capacity(hydro_count),
             lag_matrix_buf: Vec::with_capacity(max_par_order * hydro_count),
             par_inflow_buf: Vec::with_capacity(hydro_count),
-            eta_floor_buf: Vec::with_capacity(hydro_count),
-            zero_targets_buf: vec![0.0_f64; hydro_count],
             ncs_col_upper_buf: Vec::new(),
             ncs_col_lower_buf: Vec::new(),
             ncs_col_indices_buf: Vec::new(),
@@ -799,10 +806,15 @@ impl ScratchBuffers {
             ncs_col_upper_active_buf: Vec::new(),
             last_ncs_col_start: usize::MAX,
             ncs_col_upper_extract_buf: Vec::new(),
+            inflow_slack_lower_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_upper_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_indices_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_lower_scaled_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_upper_scaled_buf: Vec::with_capacity(hydro_count),
+            last_inflow_slack_col_start: usize::MAX,
             load_rhs_buf: Vec::with_capacity(load_row_capacity),
             row_lower_buf: Vec::new(),
             z_inflow_rhs_buf: Vec::with_capacity(hydro_count),
-            effective_eta_buf: Vec::with_capacity(hydro_count),
             unscaled_primal: Vec::new(),
             unscaled_dual: Vec::new(),
             lag_accumulator: vec![0.0_f64; hydro_count],
@@ -1146,6 +1158,49 @@ impl BasisStoreSliceMut<'_> {
             self.scenario_end
         );
         (scenario - self.scenario_offset) * self.num_nodes + node.0
+    }
+}
+
+#[cfg(test)]
+impl ScratchBuffers {
+    /// Hydro-indexed noise buffers sized by `hydro_count`, everything else empty;
+    /// lazy-rebuild keys at their never-built sentinel.
+    #[must_use]
+    pub(crate) fn for_test(hydro_count: usize) -> Self {
+        Self {
+            inflow_m3s_buf: Vec::with_capacity(hydro_count),
+            lag_matrix_buf: Vec::new(),
+            par_inflow_buf: Vec::with_capacity(hydro_count),
+            ncs_col_upper_buf: Vec::new(),
+            ncs_col_lower_buf: Vec::new(),
+            ncs_col_indices_buf: Vec::new(),
+            ncs_col_lower_active_buf: Vec::new(),
+            ncs_col_upper_active_buf: Vec::new(),
+            last_ncs_col_start: usize::MAX,
+            ncs_col_upper_extract_buf: Vec::new(),
+            inflow_slack_lower_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_upper_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_indices_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_lower_scaled_buf: Vec::with_capacity(hydro_count),
+            inflow_slack_col_upper_scaled_buf: Vec::with_capacity(hydro_count),
+            last_inflow_slack_col_start: usize::MAX,
+            load_rhs_buf: Vec::new(),
+            row_lower_buf: Vec::new(),
+            z_inflow_rhs_buf: Vec::with_capacity(hydro_count),
+            unscaled_primal: Vec::new(),
+            unscaled_dual: Vec::new(),
+            lag_accumulator: Vec::new(),
+            lag_weight_accum: Vec::new(),
+            downstream_accumulator: Vec::new(),
+            downstream_weight_accum: 0.0,
+            downstream_completed_lags: Vec::new(),
+            downstream_n_completed: 0,
+            recon_slot_lookup: Vec::new(),
+            trajectory_costs_buf: Vec::new(),
+            raw_noise_buf: Vec::new(),
+            corr_scratch: Vec::new(),
+            current_node_buf: Vec::new(),
+        }
     }
 }
 

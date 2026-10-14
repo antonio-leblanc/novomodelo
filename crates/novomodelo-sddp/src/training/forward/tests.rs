@@ -549,37 +549,7 @@ fn single_workspace(solver: MockSolver, state: &StateSpace) -> SolverWorkspace<M
         solver: ProfiledSolver::new(solver),
         patch_buf: PatchBuffer::new(state, &[], &[]),
         current_state: Vec::with_capacity(state.n_state),
-        scratch: ScratchBuffers {
-            inflow_m3s_buf: Vec::with_capacity(state.hydro_count),
-            lag_matrix_buf: Vec::with_capacity(state.max_par_order * state.hydro_count),
-            par_inflow_buf: Vec::with_capacity(state.hydro_count),
-            eta_floor_buf: Vec::with_capacity(state.hydro_count),
-            zero_targets_buf: vec![0.0_f64; state.hydro_count],
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::new(),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: vec![],
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            corr_scratch: Vec::new(),
-            current_node_buf: Vec::new(),
-        },
+        scratch: ScratchBuffers::for_test(state.hydro_count),
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
         worker_timing_buf: WorkerPhaseTimings::default(),
@@ -2024,11 +1994,12 @@ fn make_stochastic_1h_1s(mean_m3s: f64, std_m3s: f64) -> StochasticContext {
 }
 
 /// Helper that runs `run_forward_pass` with 1 scenario, 1 stage, and returns
-/// the `z_inflow_rhs_buf` from the workspace after the call.
+/// the `z_inflow_rhs_buf` and the physical inflow-slack bounds from the workspace
+/// after the call.
 fn run_single_stage_forward(
     stochastic: &StochasticContext,
     inflow_method: InflowNonNegativityMethod,
-) -> Vec<f64> {
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let state = test_support::state_layout(1, 0);
     let solution = fixed_solution(4, 0.0, state.theta, 0.0);
     let solver = MockSolver::always_ok(solution);
@@ -2108,33 +2079,28 @@ fn run_single_stage_forward(
     )
     .unwrap();
 
-    ws.scratch.z_inflow_rhs_buf.clone()
+    (
+        ws.scratch.z_inflow_rhs_buf.clone(),
+        ws.scratch.inflow_slack_lower_buf.clone(),
+        ws.scratch.inflow_slack_upper_buf.clone(),
+    )
 }
 
+/// Truncation keeps the forward z RHS raw (negative here) and fixes the slack at
+/// the truncation amount `-z`; exact for PAR(0), where the out-of-LP PAR value and
+/// the z RHS both compute `b + σ·η`.
 #[test]
-fn truncation_clamps_negative_inflow_noise() {
+fn truncation_writes_the_raw_rhs_and_fixes_the_slack_at_the_correction() {
     // Deterministic base = -1000 m³/s (always produces negative inflow).
-    let mean_m3s = -1000.0_f64;
-    let sigma = 1.0_f64;
+    let stochastic = make_stochastic_1h_1s(-1000.0, 1.0);
 
-    let stochastic = make_stochastic_1h_1s(mean_m3s, sigma);
-
-    let z_inflow_truncation =
+    let (z, lower, upper) =
         run_single_stage_forward(&stochastic, InflowNonNegativityMethod::Truncation);
 
-    assert_eq!(
-        z_inflow_truncation.len(),
-        1,
-        "z_inflow_rhs_buf must have 1 entry"
-    );
-    // After truncation: z_inflow_rhs[0] = mean + sigma * eta_clamped, the
-    // realized inflow in m3/s (no zeta). eta_clamped = max(eta, eta_min) where
-    // eta_min = (0 - mean) / sigma = 1000, so z_inflow_rhs[0] = 0.0 exactly.
-    assert!(
-        z_inflow_truncation[0] >= 0.0,
-        "after truncation, z_inflow_rhs[0] must be >= 0 (inflow cannot be negative), got {}",
-        z_inflow_truncation[0]
-    );
+    assert_eq!(z.len(), 1, "z_inflow_rhs_buf must have 1 entry");
+    assert!(z[0] < 0.0, "the z RHS stays raw, got {}", z[0]);
+    assert_eq!(lower[0].to_bits(), (-z[0]).to_bits(), "lower bound is -z");
+    assert_eq!(upper[0].to_bits(), (-z[0]).to_bits(), "upper bound is -z");
 }
 
 /// Truncation does not clamp when inflow is positive.
@@ -2149,9 +2115,10 @@ fn truncation_no_clamp_when_inflow_positive() {
 
     let stochastic = make_stochastic_1h_1s(mean_m3s, sigma);
 
-    let z_inflow_truncation =
+    let (z_inflow_truncation, _, _) =
         run_single_stage_forward(&stochastic, InflowNonNegativityMethod::Truncation);
-    let z_inflow_none = run_single_stage_forward(&stochastic, InflowNonNegativityMethod::None);
+    let (z_inflow_none, _, _) =
+        run_single_stage_forward(&stochastic, InflowNonNegativityMethod::None);
 
     assert_eq!(z_inflow_truncation.len(), 1);
     assert_eq!(z_inflow_none.len(), 1);
@@ -2541,37 +2508,7 @@ fn forward_pass_load_noise_positive_realization() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
-        scratch: ScratchBuffers {
-            inflow_m3s_buf: Vec::with_capacity(1),
-            lag_matrix_buf: Vec::with_capacity(0),
-            par_inflow_buf: Vec::with_capacity(1),
-            eta_floor_buf: Vec::with_capacity(1),
-            zero_targets_buf: vec![0.0_f64; 1],
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: vec![],
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            corr_scratch: Vec::new(),
-            current_node_buf: Vec::new(),
-        },
+        scratch: ScratchBuffers::for_test(1),
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
         worker_timing_buf: WorkerPhaseTimings::default(),
@@ -2680,37 +2617,7 @@ fn forward_pass_load_noise_clamped_to_zero() {
         ))),
         patch_buf,
         current_state: Vec::with_capacity(state.n_state),
-        scratch: ScratchBuffers {
-            inflow_m3s_buf: Vec::with_capacity(1),
-            lag_matrix_buf: Vec::with_capacity(0),
-            par_inflow_buf: Vec::with_capacity(1),
-            eta_floor_buf: Vec::with_capacity(1),
-            zero_targets_buf: vec![0.0_f64; 1],
-            ncs_col_upper_buf: Vec::new(),
-            ncs_col_lower_buf: Vec::new(),
-            ncs_col_indices_buf: Vec::new(),
-            ncs_col_lower_active_buf: Vec::new(),
-            ncs_col_upper_active_buf: Vec::new(),
-            last_ncs_col_start: usize::MAX,
-            ncs_col_upper_extract_buf: Vec::new(),
-            load_rhs_buf: Vec::with_capacity(n_load_buses),
-            row_lower_buf: Vec::new(),
-            z_inflow_rhs_buf: Vec::new(),
-            effective_eta_buf: Vec::new(),
-            unscaled_primal: Vec::new(),
-            unscaled_dual: Vec::new(),
-            lag_accumulator: vec![],
-            lag_weight_accum: vec![],
-            downstream_accumulator: Vec::new(),
-            downstream_weight_accum: 0.0,
-            downstream_completed_lags: Vec::new(),
-            downstream_n_completed: 0,
-            recon_slot_lookup: Vec::new(),
-            trajectory_costs_buf: Vec::new(),
-            raw_noise_buf: Vec::new(),
-            corr_scratch: Vec::new(),
-            current_node_buf: Vec::new(),
-        },
+        scratch: ScratchBuffers::for_test(1),
         scratch_basis: Basis::new(0, 0),
         backward_accum: BackwardAccumulators::default(),
         worker_timing_buf: WorkerPhaseTimings::default(),

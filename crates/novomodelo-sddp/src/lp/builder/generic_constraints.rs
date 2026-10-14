@@ -326,10 +326,9 @@ fn resolve_hydro_inflow(
     result
 }
 
-/// Push plant `plant_idx`'s own local inflow rate onto `out`: its `z_inflow`
-/// column, then each `diversion_upstream` source into it, both at `1.0`
-/// (mirrors `push_z_inflow_coupling`'s z coupling and the diversion-inflow
-/// loop in `fill_state_and_water_entries`, both `lp/builder/entries.rs`).
+/// Push plant `plant_idx`'s own local inflow rate onto `out`: `z` at `1.0`, its
+/// inflow-slack column at `1.0` under the truncation methods only (never under
+/// `Penalty`), then each `diversion_upstream` source into it at `1.0`.
 fn push_local_inflow_rate(
     plant_idx: usize,
     blk: BlockIdx,
@@ -337,10 +336,11 @@ fn push_local_inflow_rate(
     layout: &StageLayout<'_>,
     out: &mut Vec<(usize, f64)>,
 ) {
-    out.push((
-        layout.state.z_inflow_col(HydroSys::new(plant_idx)).get(),
-        1.0,
-    ));
+    let plant = HydroSys::new(plant_idx);
+    out.push((layout.state.z_inflow_col(plant).get(), 1.0));
+    if ctx.study_dims.inflow_method.truncates() {
+        out.push((layout.geometry.inflow_slack_col(plant), 1.0));
+    }
 
     if !layout.geometry.diversion.is_empty() {
         let diversion_into = ctx

@@ -15,8 +15,40 @@ Cobre's.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING:** the default of `modeling.inflow_non_negativity.method` is now
+  `truncation_with_penalty` (was `penalty`). Studies that omit the method change
+  behaviour; set `"penalty"` explicitly to keep the previous default.
+- **BREAKING:** `truncation` and `truncation_with_penalty` follow Larroyd et al.
+  (2022). The PAR inflow stays raw: it is the incremental inflow and the next
+  stage's lag, and it may be negative. A per-hydro correction lifts the local
+  inflow to zero: under `truncation` it is fixed at `max(−r, 0)` at no cost; under
+  `truncation_with_penalty` it lies between 0 and `max(−r, 0)` and is priced by
+  `penalties.json → hydro.inflow_nonnegativity_cost`. Before, the noise was raised
+  until the inflow was non-negative, and `truncation_with_penalty` also added a
+  priced correction with no upper bound. Results of studies whose inflow draws go
+  negative change. `incremental_inflow_m3s` reports the raw value and
+  `inflow_nonnegativity_slack_m3s` the correction. Policies trained with either
+  method before this change describe the old model; retrain them. Under either
+  truncation method the lower bound is not guaranteed to stay below the upper
+  bound, and the `gap` stopping rule can then report convergence that has not
+  occurred (the paper's §2.5).
+- **BREAKING:** `novomodelo_sddp::InflowNonNegativityMethod::has_slack_columns()`
+  now also returns true for `Truncation`, whose LP gains one correction column per
+  hydro. A stored basis from an earlier `truncation` run no longer fits the LP and
+  is not used (the solve starts cold).
+- Under `penalty` and `truncation_with_penalty`, the inflow slack of a plant
+  before filling now enters the water balance of the plant that receives its
+  inflow; before, it entered no balance.
+- Under the truncation methods, a generic constraint's `hydro_inflow` term counts
+  the correction with the inflow, so it reads the water that enters the balance.
+  Under `penalty` the slack stays excluded.
+
 ### Fixed
 
+- `truncation` no longer reaches an infeasible LP when the inflow's standard
+  deviation is zero.
 - `novomodelo run` under MPI no longer panics when the forward passes do not
   divide evenly across ranks. A rank holding fewer passes than another could
   index its stored warm-start bases out of bounds, and the job then hung. Such
@@ -24,6 +56,13 @@ Cobre's.
 - A rank that panics during `novomodelo run` under MPI aborts the whole job
   with exit code 101. The other ranks used to wait in a collective until the
   job was killed.
+
+### Removed
+
+- **BREAKING:** `novomodelo_stochastic::solve_par_noise_batch` and its deprecated alias
+  `solve_par_noises`. Call `solve_par_noise` per series with
+  `PrecomputedPar::deterministic_base`, `psi_slice` and `sigma` instead;
+  `evaluate_par_batch` is unchanged.
 
 ## [0.18.0] - 2026-10-07
 

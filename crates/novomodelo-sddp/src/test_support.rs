@@ -69,7 +69,9 @@ use crate::lp::indexer::{
     AnticipatedPlants, BlockRowFamily, CutStateProjection, EntityPositions, HydroCellIndex,
     HydroSys, StateDim, StateSpace, StudyDimensions,
 };
-use crate::noise::{DownstreamAccumState, LagAccumState};
+use crate::noise::{
+    DownstreamAccumState, LagAccumState, apply_inflow_slack_col_bounds, transform_inflow_noise,
+};
 use crate::policy::policy_load::{
     FullFcf, PolicyLoadProof, PolicyStageManifest, validate_policy_load,
 };
@@ -88,9 +90,7 @@ use crate::time_value::{PostStudyResolved, TimeValue};
 use crate::training::backward::{
     extract_state_duals_only, fill_external_opening_noise, write_opening_outcome,
 };
-use crate::training::stage_solve_prep::{
-    InflowNoise, StageSolvePrep, StageSolvePrepParams, StateSource,
-};
+use crate::training::stage_solve_prep::{StageSolvePrep, StageSolvePrepParams, StateSource};
 use crate::trajectory::TrajectoryRecord;
 use crate::workspace::{CapturedBasis, ScratchBuffers, SolverWorkspace, WorkspaceSizing};
 use novomodelo_core::scenario::{ExternalLoadRow, ExternalScenarioRow};
@@ -747,7 +747,11 @@ pub fn geometry(
         evaporation_models,
         anticipated_lead_stages,
         anticipated_plants: dims.anticipated_plants.clone(),
-        has_penalty: dims.has_inflow_penalty,
+        inflow_method: if dims.has_inflow_penalty {
+            crate::InflowNonNegativityMethod::Penalty
+        } else {
+            crate::InflowNonNegativityMethod::None
+        },
         bounds,
         time_value,
         ..CtxFixture::default()
@@ -1592,8 +1596,7 @@ pub fn anticipated_slot_over(thermal_id: i32, ring_slot: u32, start: i32, end: i
 
 /// Patch one stage-LP solve exactly as the production backward pass's
 /// `patch_opening_bounds` does (`training/backward/lp_setup.rs`): delegates
-/// verbatim to `StageSolvePrep::run` with the backward-opening variation
-/// point (`InflowNoise::Transform`) — no probe-side reimplementation of the
+/// verbatim to `StageSolvePrep::run` — no probe-side reimplementation of the
 /// patch pipeline (the z-inflow column's RHS, NCS availability).
 pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
     ws: &mut SolverWorkspace<S>,
@@ -1605,7 +1608,6 @@ pub fn patch_backward_opening_for_probe<S: SolverInterface + Send>(
 ) {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(pinned_state),
-        inflow_noise: InflowNoise::Transform,
         raw_noise,
     };
     StageSolvePrep::run(
@@ -1634,7 +1636,6 @@ pub fn patch_backward_opening_for_counterfactual_probe<S: SolverInterface + Send
 ) {
     let prep_params = StageSolvePrepParams {
         state_source: StateSource(pinned_state),
-        inflow_noise: InflowNoise::Transform,
         raw_noise,
     };
     StageSolvePrep::run_ignoring_producer_box(
@@ -1819,6 +1820,148 @@ pub fn write_backward_opening_outcome_at_canonical_state_for_probe<S: SolverInte
     canonical_x_hat: &[f64],
     raw_noise: &[f64],
 ) -> Result<CanonicalCutProbe, SddpError> {
+    probe_backward_opening(
+        ws,
+        ctx,
+        training_ctx,
+        cut_pool,
+        cut_state,
+        stage,
+        node_id,
+        canonical_x_hat,
+        raw_noise,
+        None,
+    )
+    .map(|(probe, _)| probe)
+}
+
+/// [`write_backward_opening_outcome_at_canonical_state_for_probe`] with the
+/// inflow-slack column bounds overridden by the given physical (m³/s) per-hydro
+/// bounds after the regular patch; also returns the solved, unscaled slack primal
+/// per hydro.
+///
+/// # Panics
+///
+/// Panics if `canonical_x_hat.len() != StateSpace::n_state`, or if either bound
+/// slice does not have one entry per inflow-slack column.
+///
+/// # Errors
+///
+/// Propagates [`SddpError`] from the stage solve.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the canonical-state probe's nine solve inputs plus the slack-bound override; a bundling struct would only relocate them"
+)]
+pub fn write_backward_opening_outcome_with_inflow_slack_bounds_for_probe<
+    S: SolverInterface + Send,
+>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    cut_pool: &CutPool,
+    cut_state: &CutStateProjection,
+    stage: StageIdx,
+    node_id: NodeId,
+    canonical_x_hat: &[f64],
+    raw_noise: &[f64],
+    inflow_slack_lower: &[f64],
+    inflow_slack_upper: &[f64],
+) -> Result<(CanonicalCutProbe, Vec<f64>), SddpError> {
+    probe_backward_opening(
+        ws,
+        ctx,
+        training_ctx,
+        cut_pool,
+        cut_state,
+        stage,
+        node_id,
+        canonical_x_hat,
+        raw_noise,
+        Some((inflow_slack_lower, inflow_slack_upper)),
+    )
+}
+
+/// The solved z-inflow primal per hydro (unscaled, canonical hydro order) of `stage`'s
+/// LP loaded, patched and solved at `incoming_state` and `raw_noise` the way a backward
+/// opening is.
+///
+/// # Panics
+///
+/// Panics if `incoming_state.len() != StateSpace::n_state`.
+///
+/// # Errors
+///
+/// Propagates [`SddpError`] from the stage solve.
+pub fn z_inflow_primal_for_probe<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    cut_pool: &CutPool,
+    stage: StageIdx,
+    node_id: NodeId,
+    incoming_state: &[f64],
+    raw_noise: &[f64],
+) -> Result<Vec<f64>, SddpError> {
+    let layout = training_ctx.state;
+    assert_eq!(
+        incoming_state.len(),
+        layout.n_state,
+        "incoming_state must have one entry per state dimension"
+    );
+    let template = ctx.template(stage);
+    ws.solver.reset_solver_state();
+    ws.solver.load_model(template);
+    patch_backward_opening_for_probe(ws, ctx, training_ctx, stage, incoming_state, raw_noise);
+    let col_scale = &template.col_scale;
+    let view = solve_stage_for_probe(ws, ctx, cut_pool, None, stage, 0, node_id)?;
+    Ok(layout
+        .z_inflow
+        .clone()
+        .map(|col| view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0))
+        .collect())
+}
+
+/// The physical (m³/s) inflow-slack bounds the per-solve transform writes for
+/// `incoming_state` and `raw_noise` at `stage`, as `(lower, upper)`; both empty when the
+/// method does not truncate. Touches no LP.
+pub fn inflow_slack_bounds_for_probe<S: SolverInterface>(
+    ws: &mut SolverWorkspace<S>,
+    training_ctx: &TrainingContext<'_>,
+    stage: StageIdx,
+    incoming_state: &[f64],
+    raw_noise: &[f64],
+) -> (Vec<f64>, Vec<f64>) {
+    transform_inflow_noise(
+        raw_noise,
+        stage,
+        incoming_state,
+        training_ctx,
+        &mut ws.scratch,
+    );
+    (
+        ws.scratch.inflow_slack_lower_buf.clone(),
+        ws.scratch.inflow_slack_upper_buf.clone(),
+    )
+}
+
+/// Shared body of the canonical-state probes: patch, optionally override the
+/// inflow-slack bounds, solve, and write the opening outcome.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the canonical-state probe's nine solve inputs plus the slack-bound override; a bundling struct would only relocate them"
+)]
+fn probe_backward_opening<S: SolverInterface + Send>(
+    ws: &mut SolverWorkspace<S>,
+    ctx: &StageContext<'_>,
+    training_ctx: &TrainingContext<'_>,
+    cut_pool: &CutPool,
+    cut_state: &CutStateProjection,
+    stage: StageIdx,
+    node_id: NodeId,
+    canonical_x_hat: &[f64],
+    raw_noise: &[f64],
+    slack_override: Option<(&[f64], &[f64])>,
+) -> Result<(CanonicalCutProbe, Vec<f64>), SddpError> {
     let layout = training_ctx.state;
     assert_eq!(
         canonical_x_hat.len(),
@@ -1830,6 +1973,29 @@ pub fn write_backward_opening_outcome_at_canonical_state_for_probe<S: SolverInte
     ws.solver.reset_solver_state();
     ws.solver.load_model(template);
     patch_backward_opening_for_probe(ws, ctx, training_ctx, stage, canonical_x_hat, raw_noise);
+    let geometry = &ctx.geometry_per_stage[stage.0];
+    if let Some((lower, upper)) = slack_override {
+        assert_eq!(
+            lower.len(),
+            geometry.inflow_slack.len(),
+            "override lower bounds must have one entry per inflow-slack column"
+        );
+        assert_eq!(
+            upper.len(),
+            geometry.inflow_slack.len(),
+            "override upper bounds must have one entry per inflow-slack column"
+        );
+        ws.scratch.inflow_slack_lower_buf.clear();
+        ws.scratch.inflow_slack_lower_buf.extend_from_slice(lower);
+        ws.scratch.inflow_slack_upper_buf.clear();
+        ws.scratch.inflow_slack_upper_buf.extend_from_slice(upper);
+        apply_inflow_slack_col_bounds(
+            &mut ws.solver,
+            &mut ws.scratch,
+            geometry,
+            &template.col_scale,
+        );
+    }
 
     let mut stats_before = SolverStatistics::default();
     ws.solver.statistics_into(&mut stats_before);
@@ -1843,6 +2009,11 @@ pub fn write_backward_opening_outcome_at_canonical_state_for_probe<S: SolverInte
             let col = layout.state_to_lp_incoming_column(StateDim::new(j)).get();
             view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0)
         })
+        .collect();
+    let slack_primal: Vec<f64> = geometry
+        .inflow_slack
+        .clone()
+        .map(|col| view.primal[col] * col_scale.get(col).copied().unwrap_or(1.0))
         .collect();
     ws.backward_accum.state_duals_buf = state_duals;
 
@@ -1876,11 +2047,14 @@ pub fn write_backward_opening_outcome_at_canonical_state_for_probe<S: SolverInte
         &stats_after,
     );
 
-    Ok(CanonicalCutProbe {
-        outcome: ws.backward_accum.outcomes[0].clone(),
-        canonical_x_hat: canonical_x_hat.to_vec(),
-        pinned_x_hat,
-    })
+    Ok((
+        CanonicalCutProbe {
+            outcome: ws.backward_accum.outcomes[0].clone(),
+            canonical_x_hat: canonical_x_hat.to_vec(),
+            pinned_x_hat,
+        },
+        slack_primal,
+    ))
 }
 
 /// Trial-point states in the flat shape the passes index, `records[m * n_stages + stage]`.
@@ -3144,7 +3318,6 @@ fn capture_patched_node_template_with_raw_noise(
     let mut scratch = ScratchBuffers::new(&training_ctx, &ctx, WorkspaceSizing::default());
     let params = StageSolvePrepParams {
         state_source: StateSource(incoming_state),
-        inflow_noise: InflowNoise::Transform,
         raw_noise,
     };
     StageSolvePrep::run(

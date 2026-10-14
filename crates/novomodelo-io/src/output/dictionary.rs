@@ -448,7 +448,7 @@ const DESCRIPTIONS: &[(&str, &str, &str)] = &[
     (
         "hydros",
         "incremental_inflow_m3s",
-        "Incremental (local) inflow",
+        "Incremental (local) inflow: the raw PAR value, which may be negative; gross of withdrawal and of the inflow non-negativity slack",
     ),
     (
         "hydros",
@@ -490,7 +490,7 @@ const DESCRIPTIONS: &[(&str, &str, &str)] = &[
     (
         "hydros",
         "incremental_inflow_energy_mw",
-        "Incremental natural energy inflow (`ρ_acum` · incremental inflow)",
+        "Incremental natural energy inflow (`ρ_acum` · incremental inflow); negative when the incremental inflow is",
     ),
     (
         "hydros",
@@ -561,7 +561,7 @@ const DESCRIPTIONS: &[(&str, &str, &str)] = &[
     (
         "hydros",
         "inflow_nonnegativity_slack_m3s",
-        "Inflow non-negativity slack",
+        "Water added to the incremental inflow in the water balance: the non-negativity correction under the truncation methods, the penalty slack under the penalty method, 0 without one; for a plant before filling it lands, like the inflow, on the plant that receives its inflow",
     ),
     (
         "hydros",
@@ -740,7 +740,7 @@ const DESCRIPTIONS: &[(&str, &str, &str)] = &[
     (
         "inflow_lags",
         "inflow_m3s",
-        "Historical inflow for this lag",
+        "Inflow at this lag: the seed derived from history (0 without one) at the first stage, the raw simulated PAR value afterwards",
     ),
     ("in_transit", "stage_id", "Stage index"),
     (
