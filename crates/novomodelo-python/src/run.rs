@@ -92,6 +92,7 @@ use novomodelo_io::write_training_results;
 use novomodelo_sddp::HydroFitTimings;
 use novomodelo_sddp::SddpError;
 use novomodelo_sddp::SimulationWeighting;
+use novomodelo_sddp::StatsFoldMode;
 use novomodelo_sddp::TrainingResult;
 use novomodelo_sddp::aggregate_simulation;
 use novomodelo_sddp::aggregate_solver_stats_log;
