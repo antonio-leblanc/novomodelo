@@ -1,13 +1,13 @@
 //! Integration tests for how `novomodelo run` handles SIGTERM and SIGINT, in one
 //! process and under `mpiexec -n 2`, and for the exit code every rank takes when
 //! rank 0's final writes fail. The tests spawn the binary, signal a process at a
-//! stderr readiness line, and check the exit status and outputs.
+//! stdout readiness line, and check the exit status and outputs.
 
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -131,7 +131,12 @@ fn output_with_a_stale_simulation_partition() -> TempDir {
     out
 }
 
-fn spawn_run(launcher: Option<&Path>, case: &Path, out: &Path) -> (Child, Receiver<String>) {
+/// Returns the child with its stdout and stderr line receivers.
+fn spawn_run(
+    launcher: Option<&Path>,
+    case: &Path,
+    out: &Path,
+) -> (Child, Receiver<String>, Receiver<String>) {
     let binary = novomodelo();
     let mut command = match launcher {
         Some(launcher) => {
@@ -146,21 +151,29 @@ fn spawn_run(launcher: Option<&Path>, case: &Path, out: &Path) -> (Child, Receiv
         .arg(case)
         .arg("--output")
         .arg(out)
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("novomodelo must spawn");
 
-    let mut stderr = BufReader::new(child.stderr.take().expect("stderr is piped"));
+    let stdout = read_lines(child.stdout.take().expect("stdout is piped"));
+    let stderr = read_lines(child.stderr.take().expect("stderr is piped"));
+    (child, stdout, stderr)
+}
+
+/// Drains `stream` on its own thread, so the run never blocks on a full pipe
+/// even when nobody reads the receiver.
+fn read_lines(stream: impl Read + Send + 'static) -> Receiver<String> {
+    let mut reader = BufReader::new(stream);
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut line = Vec::new();
-        while stderr.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
+        while reader.read_until(b'\n', &mut line).is_ok_and(|n| n > 0) {
             let _ = tx.send(String::from_utf8_lossy(&line).trim_end().to_string());
             line.clear();
         }
     });
-    (child, rx)
+    rx
 }
 
 fn wait_for_line(
@@ -173,9 +186,9 @@ fn wait_for_line(
         let failure = match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(line) if pred(&line) => return line,
             Ok(_) => continue,
-            Err(RecvTimeoutError::Timeout) => format!("no matching stderr line within {TIMEOUT:?}"),
+            Err(RecvTimeoutError::Timeout) => format!("no matching stdout line within {TIMEOUT:?}"),
             Err(RecvTimeoutError::Disconnected) => {
-                "the run closed stderr before printing the expected line".to_string()
+                "the run closed stdout before printing the expected line".to_string()
             }
         };
         let _ = child.kill();
@@ -228,14 +241,14 @@ fn wait_until(child: &mut Child, deadline: Instant) -> ExitStatus {
     }
 }
 
-/// The stderr lines not yet consumed, through the end of the stream.
+/// The lines of `rx` not yet consumed, through the end of the stream.
 fn remaining_lines(rx: &Receiver<String>, deadline: Instant) -> Vec<String> {
     let mut lines = Vec::new();
     loop {
         match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(line) => lines.push(line),
             Err(RecvTimeoutError::Disconnected) => return lines,
-            Err(RecvTimeoutError::Timeout) => panic!("stderr stayed open after the run exited"),
+            Err(RecvTimeoutError::Timeout) => panic!("a stream stayed open after the run exited"),
         }
     }
 }
@@ -287,9 +300,9 @@ fn assert_one_signal_stops_gracefully(sig: &str) {
     let case = case_with_config(STOP_CONFIG);
     let out = output_with_a_stale_simulation_partition();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
-    wait_for_line(&mut child, &rx, is_progress_line, deadline);
+    wait_for_line(&mut child, &stdout, is_progress_line, deadline);
     send(&mut child, sig);
     let status = wait_until(&mut child, deadline);
 
@@ -316,13 +329,13 @@ fn repeated_sigterm_stays_graceful_through_the_final_writes() {
     let case = case_with_config(STOP_CONFIG);
     let out = output_with_a_stale_simulation_partition();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
-    wait_for_line(&mut child, &rx, is_progress_line, deadline);
+    wait_for_line(&mut child, &stdout, is_progress_line, deadline);
     send(&mut child, "TERM");
     wait_for_line(
         &mut child,
-        &rx,
+        &stdout,
         |line| line == "Writing training outputs...",
         deadline,
     );
@@ -343,9 +356,9 @@ fn second_sigint_terminates_a_single_process_run_by_sigint() {
     let case = case_with_config(SLOW_ITERATION_CONFIG);
     let out = TempDir::new().unwrap();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
-    wait_for_line(&mut child, &rx, is_progress_line, deadline);
+    wait_for_line(&mut child, &stdout, is_progress_line, deadline);
     send(&mut child, "INT");
     thread::sleep(Duration::from_millis(20));
     send(&mut child, "INT");
@@ -359,11 +372,11 @@ fn sigterm_during_the_simulation_terminates_by_the_signal() {
     let case = case_with_config(LONG_SIMULATION_CONFIG);
     let out = TempDir::new().unwrap();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
     wait_for_line(
         &mut child,
-        &rx,
+        &stdout,
         |line| line.starts_with("Simulation starting..."),
         deadline,
     );
@@ -379,11 +392,11 @@ fn sigterm_during_the_training_writes_never_completes_the_simulation() {
     let case = case_with_config(THREE_ITERATION_CONFIG);
     let out = TempDir::new().unwrap();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
     wait_for_line(
         &mut child,
-        &rx,
+        &stdout,
         |line| line == "Writing training outputs...",
         deadline,
     );
@@ -416,17 +429,17 @@ fn signal_coincident_with_the_iteration_limit_exits_5_with_complete_training() {
     let case = case_with_config(SLOW_THREE_ITERATION_CONFIG);
     let out = output_with_a_stale_simulation_partition();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
     wait_for_line(
         &mut child,
-        &rx,
+        &stdout,
         |line| line.starts_with("Training   2/3 iter"),
         deadline,
     );
     send(&mut child, "TERM");
     let status = wait_until(&mut child, deadline);
-    let timings: Vec<String> = remaining_lines(&rx, deadline)
+    let timings: Vec<String> = remaining_lines(&stdout, deadline)
         .into_iter()
         .filter(|line| line.starts_with("Training   3/3") || line.contains("Output written to"))
         .collect();
@@ -455,9 +468,9 @@ fn sigterm_stop_without_a_configured_simulation_exits_5() {
     let case = case_with_config(NO_SIMULATION_CONFIG);
     let out = TempDir::new().unwrap();
     let deadline = Instant::now() + TIMEOUT;
-    let (mut child, rx) = spawn_run(None, case.path(), out.path());
+    let (mut child, stdout, _stderr) = spawn_run(None, case.path(), out.path());
 
-    wait_for_line(&mut child, &rx, is_progress_line, deadline);
+    wait_for_line(&mut child, &stdout, is_progress_line, deadline);
     send(&mut child, "TERM");
     let status = wait_until(&mut child, deadline);
 
@@ -514,17 +527,20 @@ mod mpi {
         let case = case_with_config(STOP_CONFIG);
         let out = output_with_a_stale_simulation_partition();
         let deadline = Instant::now() + TIMEOUT;
-        let (mut child, rx) = spawn_run(Some(&mpiexec()), case.path(), out.path());
+        let (mut child, stdout, stderr) = spawn_run(Some(&mpiexec()), case.path(), out.path());
 
-        wait_for_line(&mut child, &rx, is_progress_line, deadline);
+        wait_for_line(&mut child, &stdout, is_progress_line, deadline);
         signal_pids(&[rank_pid(out.path(), 1)], "TERM");
         let status = wait_until(&mut child, deadline);
-        let stderr = remaining_lines(&rx, deadline);
+        let output: Vec<String> = remaining_lines(&stdout, deadline)
+            .into_iter()
+            .chain(remaining_lines(&stderr, deadline))
+            .collect();
 
         assert_graceful_launcher_exit(status);
         assert!(
-            !stderr.iter().any(|line| line.contains("MPI_Abort")),
-            "{stderr:#?}"
+            !output.iter().any(|line| line.contains("MPI_Abort")),
+            "{output:#?}"
         );
         assert_signal_stop_outputs(out.path());
     }
@@ -534,9 +550,9 @@ mod mpi {
         let case = case_with_config(SLOW_ITERATION_CONFIG);
         let out = output_with_a_stale_simulation_partition();
         let deadline = Instant::now() + TIMEOUT;
-        let (mut child, rx) = spawn_run(Some(&mpiexec()), case.path(), out.path());
+        let (mut child, stdout, _stderr) = spawn_run(Some(&mpiexec()), case.path(), out.path());
 
-        wait_for_line(&mut child, &rx, is_progress_line, deadline);
+        wait_for_line(&mut child, &stdout, is_progress_line, deadline);
         let rank_1 = rank_pid(out.path(), 1);
         signal_pids(&[rank_1], "INT");
         thread::sleep(Duration::from_millis(20));
@@ -552,14 +568,14 @@ mod mpi {
         let case = case_with_config(STOP_CONFIG);
         let out = output_with_a_stale_simulation_partition();
         let deadline = Instant::now() + TIMEOUT;
-        let (mut child, rx) = spawn_run(Some(&mpiexec()), case.path(), out.path());
+        let (mut child, stdout, _stderr) = spawn_run(Some(&mpiexec()), case.path(), out.path());
 
-        wait_for_line(&mut child, &rx, is_progress_line, deadline);
+        wait_for_line(&mut child, &stdout, is_progress_line, deadline);
         let ranks = [rank_pid(out.path(), 0), rank_pid(out.path(), 1)];
         signal_pids(&ranks[1..], "TERM");
         wait_for_line(
             &mut child,
-            &rx,
+            &stdout,
             |line| line == "Writing training outputs...",
             deadline,
         );
@@ -577,7 +593,7 @@ mod mpi {
         let out = TempDir::new().unwrap();
         fs::create_dir_all(out.path().join("training/metadata.json.tmp")).unwrap();
         let deadline = Instant::now() + TIMEOUT;
-        let (mut child, _rx) = spawn_run(Some(&mpiexec()), case.path(), out.path());
+        let (mut child, _stdout, _stderr) = spawn_run(Some(&mpiexec()), case.path(), out.path());
 
         let status = wait_until(&mut child, deadline);
 
@@ -593,9 +609,9 @@ mod mpi {
         let out = TempDir::new().unwrap();
         fs::create_dir_all(out.path().join("simulation/metadata.json.tmp")).unwrap();
         let deadline = Instant::now() + TIMEOUT;
-        let (mut child, rx) = spawn_run(Some(&mpiexec()), case.path(), out.path());
+        let (mut child, stdout, _stderr) = spawn_run(Some(&mpiexec()), case.path(), out.path());
 
-        wait_for_line(&mut child, &rx, is_progress_line, deadline);
+        wait_for_line(&mut child, &stdout, is_progress_line, deadline);
         signal_pids(&[rank_pid(out.path(), 1)], "TERM");
         let status = wait_until(&mut child, deadline);
 
