@@ -57,6 +57,8 @@ Cobre's.
   warnings and errors stay on stderr, and progress bars on an interactive
   terminal still draw on stderr. Scripts and job logs that read the run report
   from stderr must read stdout instead. `--color` now applies to both streams.
+- The training gap in the progress lines and the training summary is printed
+  with 5 decimals instead of 1, so small gaps no longer round to `0.0%`.
 
 ### Fixed
 
