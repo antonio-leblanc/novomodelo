@@ -22,22 +22,25 @@
 
 ## Install
 
-Nothing is published to crates.io or PyPI under this name. Build from a clone;
-the solvers are vendored as git submodules:
+```bash
+# Rust CLI (requires Rust 1.88+, CMake and a C++ compiler)
+cargo install --locked novomodelo-cli
+
+# Python bindings (3.12 / 3.13 / 3.14)
+pip install novomodelo-python
+```
+
+Each tagged release also attaches prebuilt CLI archives, with shell and
+PowerShell installers, to the repository's GitHub releases.
+
+To build from a clone instead (the solvers are vendored as git submodules):
 
 ```bash
 git clone --recurse-submodules https://github.com/ons-ccee-epe/novomodelo.git
 cd novomodelo
-
-# Rust CLI (requires Rust 1.88+)
 cargo install --locked --path crates/novomodelo-cli
-
-# Python bindings (3.12 / 3.13 / 3.14)
 pip install ./crates/novomodelo-python
 ```
-
-Each tagged release also attaches prebuilt CLI archives to the repository's
-GitHub releases.
 
 ## Quick Links
 
