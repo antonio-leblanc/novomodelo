@@ -56,6 +56,10 @@ Cobre's.
 - A rank that panics during `novomodelo run` under MPI aborts the whole job
   with exit code 101. The other ranks used to wait in a collective until the
   job was killed.
+- Under MPI, training multiplied its LP-solve count by the number of ranks, and
+  the first-try/retried/failed split and the forward solve seconds with it. The
+  training summary and `solve_stats` in `training/metadata.json` now report the
+  same counts for any rank count, and the split adds up to the total.
 
 ### Removed
 
