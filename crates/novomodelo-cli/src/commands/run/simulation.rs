@@ -555,6 +555,7 @@ mod tests {
             output_dir: output_dir.to_path_buf(),
             case_dir: case_dir.to_path_buf(),
             term_width: 80,
+            stdout: Term::stdout(),
             stderr: Term::stderr(),
             render_mode: RenderMode::auto(),
             topology: ExecutionTopology {
