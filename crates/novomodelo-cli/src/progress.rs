@@ -107,7 +107,7 @@ fn fmt_avg_lp_time(total_ms: f64, count: u64) -> String {
 pub enum RenderMode {
     /// Live-redrawn [`indicatif`] bars. Correct when stderr is a TTY.
     Interactive,
-    /// Plain append-only log lines. Correct for pipes, files, or
+    /// Plain append-only log lines on stdout. Correct for pipes, files, or
     /// `mpirun` aggregators, where ANSI cursor escapes cannot be
     /// interpreted live and would appear as duplicated output otherwise.
     Log,
@@ -321,7 +321,7 @@ impl BarRenderer {
                 let gap_pct = gap * 100.0;
                 bar.set_position(iteration);
                 bar.set_message(format!(
-                    "LB: {}  UB: {}  gap: {gap_pct:.1}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms",
+                    "LB: {}  UB: {}  gap: {gap_pct:.5}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms",
                     fmt_sci(lower_bound),
                     fmt_sci(upper_bound)
                 ));
@@ -419,7 +419,7 @@ fn create_bar(total: u64, term_width: u16, template: &str) -> ProgressBar {
 /// Write errors are silently ignored, matching the fire-and-forget style of
 /// the banner and the bar renderer's trailing newlines.
 struct LineRenderer {
-    stderr: Term,
+    out: Term,
     max_iterations: u64,
     sim_solve_time_ms: f64,
     sim_lp_count: u64,
@@ -428,7 +428,7 @@ struct LineRenderer {
 impl LineRenderer {
     fn new(max_iterations: u64) -> Self {
         Self {
-            stderr: Term::stderr(),
+            out: Term::stdout(),
             max_iterations,
             sim_solve_time_ms: 0.0,
             sim_lp_count: 0,
@@ -438,7 +438,7 @@ impl LineRenderer {
     fn handle(&mut self, event: &TrainingEvent) {
         match *event {
             TrainingEvent::TrainingStarted { .. } => {
-                let _ = self.stderr.write_line(&format!(
+                let _ = self.out.write_line(&format!(
                     "Training   starting... (max {} iterations)",
                     self.max_iterations
                 ));
@@ -449,7 +449,7 @@ impl LineRenderer {
                 threads_per_rank,
                 ..
             } => {
-                let _ = self.stderr.write_line(&format!(
+                let _ = self.out.write_line(&format!(
                     "Simulation starting... ({n_scenarios} scenarios across {ranks} ranks × {threads_per_rank} threads)"
                 ));
             }
@@ -468,8 +468,8 @@ impl LineRenderer {
                     wall_time_ms,
                     eta_millis(wall_time_ms, iteration, self.max_iterations),
                 );
-                let _ = self.stderr.write_line(&format!(
-                    "Training   {iteration}/{max} iter  LB: {lb}  UB: {ub}  gap: {gap_pct:.1}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms  {time_cell}",
+                let _ = self.out.write_line(&format!(
+                    "Training   {iteration}/{max} iter  LB: {lb}  UB: {ub}  gap: {gap_pct:.5}%  fwd: {forward_ms}ms / bwd: {backward_ms}ms  {time_cell}",
                     max = self.max_iterations,
                     lb = fmt_sci(lower_bound),
                     ub = fmt_sci(upper_bound),
@@ -494,7 +494,7 @@ impl LineRenderer {
                         u64::from(scenarios_total),
                     ),
                 );
-                let _ = self.stderr.write_line(&format!(
+                let _ = self.out.write_line(&format!(
                     "Simulation {scenarios_complete}/{scenarios_total} scenarios  {avg_lp}  {time_cell}"
                 ));
             }

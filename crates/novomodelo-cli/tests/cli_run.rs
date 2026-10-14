@@ -207,6 +207,26 @@ fn test_run_quiet_suppresses_banner_and_summary() {
         ])
         .assert()
         .success()
+        .stdout(predicate::str::contains("NOVOMODELO v").not())
+        .stdout(predicate::str::contains("Training complete in").not());
+}
+
+#[test]
+fn informational_output_goes_to_stdout_not_stderr() {
+    let dir = TempDir::new().unwrap();
+    make_valid_case(dir.path(), None, None, None, None);
+    let out = TempDir::new().unwrap();
+    novomodelo()
+        .args([
+            "run",
+            dir.path().to_str().unwrap(),
+            "--output",
+            out.path().to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("NOVOMODELO v"))
+        .stdout(predicate::str::contains("Training complete in"))
         .stderr(predicate::str::contains("NOVOMODELO v").not())
         .stderr(predicate::str::contains("Training complete in").not());
 }
@@ -1196,7 +1216,7 @@ fn run_produces_deterministic_end_block_and_metadata() {
     let out = TempDir::new().unwrap();
     let out_path = out.path();
 
-    let (_, run_stderr) = run_ok(&[
+    let (run_stdout, _) = run_ok(&[
         "run",
         case.to_str().unwrap(),
         "--output",
@@ -1228,14 +1248,14 @@ fn run_produces_deterministic_end_block_and_metadata() {
         "user_stats_white_noise",
     ] {
         assert!(
-            run_stderr.contains(needle),
-            "live run stderr must contain {needle:?}"
+            run_stdout.contains(needle),
+            "live run stdout must contain {needle:?}"
         );
     }
 
-    let forward_line = find_line(&run_stderr, "Forward");
-    let backward_line = find_line(&run_stderr, "Backward");
-    let serial_line = find_line(&run_stderr, "Serial");
+    let forward_line = find_line(&run_stdout, "Forward");
+    let backward_line = find_line(&run_stdout, "Backward");
+    let serial_line = find_line(&run_stdout, "Serial");
 
     for (label, line) in [
         ("Forward", forward_line),
@@ -1255,8 +1275,8 @@ fn run_produces_deterministic_end_block_and_metadata() {
         backward_line.contains("solve") && backward_line.contains("wait"),
         "Backward line must show the solve/wait decomposition, got: {backward_line:?}"
     );
-    assert_ordered(&run_stderr, "Forward", "Backward");
-    assert_ordered(&run_stderr, "Backward", "Serial");
+    assert_ordered(&run_stdout, "Forward", "Backward");
+    assert_ordered(&run_stdout, "Backward", "Serial");
 
     let sim_metadata_content =
         std::fs::read_to_string(out_path.join("simulation/metadata.json")).unwrap();
@@ -2114,4 +2134,61 @@ fn run_accepts_a_supplied_opening_tree_with_historical_residuals_stages() {
         .stdout(predicate::str::contains("V2.").not())
         .stderr(predicate::str::contains("historical windows").not())
         .stderr(predicate::str::contains("V2.").not());
+}
+
+#[cfg(feature = "mpi")]
+mod mpi {
+    use std::process::Command;
+
+    use super::common::mpiexec;
+    use super::*;
+
+    /// The four solve counts of `training/metadata.json` after training
+    /// `examples/1dtoy` for three iterations with two forward passes, so the
+    /// forward and backward work splits across ranks under `launcher`.
+    fn training_solve_counts(launcher: Option<&Path>) -> [u64; 4] {
+        let case = TempDir::new().unwrap();
+        copy_dir_recursive(&case_dir("1dtoy"), case.path());
+        rewrite_json(&case.path().join("config.json"), |config| {
+            config["training"]["selection"]["forward_passes"] = serde_json::json!(2);
+            config["training"]["stopping_rules"] =
+                serde_json::json!([{ "type": "iteration_limit", "limit": 3 }]);
+            config["simulation"]["enabled"] = serde_json::json!(false);
+        });
+        let out = TempDir::new().unwrap();
+        let binary = novomodelo();
+        let mut command = match launcher {
+            Some(launcher) => {
+                let mut command = Command::new(launcher);
+                command.args(["-n", "2"]).arg(binary.get_program());
+                command
+            }
+            None => binary,
+        };
+        command
+            .args(["run", case.path().to_str().unwrap()])
+            .args(["--output", out.path().to_str().unwrap(), "--quiet"])
+            .assert()
+            .success();
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(out.path().join("training/metadata.json")).unwrap(),
+        )
+        .unwrap();
+        ["total_lp_solves", "first_try", "retried", "failed"].map(|key| {
+            metadata["solve_stats"][key]
+                .as_u64()
+                .unwrap_or_else(|| panic!("solve_stats.{key} must be a count: {metadata}"))
+        })
+    }
+
+    #[test]
+    fn training_solve_counts_do_not_scale_with_the_rank_count() {
+        let single = training_solve_counts(None);
+        let two_ranks = training_solve_counts(Some(&mpiexec()));
+
+        assert_eq!(two_ranks, single, "[total, first_try, retried, failed]");
+        let [total, first_try, retried, failed] = two_ranks;
+        assert_eq!(first_try + retried + failed, total);
+    }
 }

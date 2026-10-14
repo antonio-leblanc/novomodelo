@@ -53,15 +53,15 @@ pub(super) struct WriteTrainingArgs<'a> {
     pub(super) training_result: &'a TrainingResult,
     pub(super) output_ctx: &'a OutputContext,
     pub(super) quiet: bool,
-    pub(super) stderr: &'a Term,
+    pub(super) out: &'a Term,
 }
 
 /// Write the training artifacts (policy checkpoint, results, sidecars, stats).
 pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(), CliError> {
     if !args.quiet {
         use std::io::Write;
-        let _ = args.stderr.write_line("Writing training outputs...");
-        let _ = std::io::stderr().flush();
+        let _ = args.out.write_line("Writing training outputs...");
+        let _ = std::io::stdout().flush();
     }
     let write_start = std::time::Instant::now();
 
@@ -136,7 +136,7 @@ pub(super) fn write_training_outputs(args: &WriteTrainingArgs<'_>) -> Result<(),
 
     if !args.quiet {
         let write_secs = write_start.elapsed().as_secs_f64();
-        print_output_path(args.stderr, args.output_dir, write_secs);
+        print_output_path(args.out, args.output_dir, write_secs);
     }
 
     Ok(())
@@ -153,15 +153,15 @@ pub(super) struct WriteSimulationArgs<'a> {
     pub(super) sim_scenario_costs: &'a [(u32, f64, Option<f64>)],
     pub(super) output_ctx: &'a OutputContext,
     pub(super) quiet: bool,
-    pub(super) stderr: &'a Term,
+    pub(super) out: &'a Term,
 }
 
 /// Write the simulation artifacts (results manifest and solver stats).
 pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result<(), CliError> {
     if !args.quiet {
         use std::io::Write;
-        let _ = args.stderr.write_line("Writing simulation outputs...");
-        let _ = std::io::stderr().flush();
+        let _ = args.out.write_line("Writing simulation outputs...");
+        let _ = std::io::stdout().flush();
     }
     let write_start = std::time::Instant::now();
 
@@ -205,7 +205,7 @@ pub(super) fn write_simulation_outputs(args: &WriteSimulationArgs<'_>) -> Result
 
     if !args.quiet {
         let write_secs = write_start.elapsed().as_secs_f64();
-        print_output_path(args.stderr, args.output_dir, write_secs);
+        print_output_path(args.out, args.output_dir, write_secs);
     }
 
     Ok(())

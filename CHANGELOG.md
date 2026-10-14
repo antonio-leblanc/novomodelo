@@ -44,6 +44,21 @@ Cobre's.
 - Under the truncation methods, a generic constraint's `hydro_inflow` term counts
   the correction with the inflow, so it reads the water that enters the balance.
   Under `penalty` the slack stays excluded.
+- HiGHS forward and simulation solves are cold by default: `use_warm_start`
+  now defaults to `false` for those phases, so their LPs ignore the stored
+  basis and run presolve. Backward solves still warm-start. Set
+  `"use_warm_start": true` in `training.solver.forward` or `simulation.solver`
+  to restore warm-starting for that phase. A cold solve can stop at a
+  different but equally optimal vertex, so simulated duals and the final
+  lower bound may differ slightly from 0.18.0 on the same inputs.
+- HiGHS retry escalation keeps the phase's `use_warm_start` at every retry
+  level; levels 5-11 previously reset it to the solver default.
+- `novomodelo run` writes its banner, progress lines and summaries to stdout;
+  warnings and errors stay on stderr, and progress bars on an interactive
+  terminal still draw on stderr. Scripts and job logs that read the run report
+  from stderr must read stdout instead. `--color` now applies to both streams.
+- The training gap in the progress lines and the training summary is printed
+  with 5 decimals instead of 1, so small gaps no longer round to `0.0%`.
 
 ### Fixed
 
@@ -56,6 +71,10 @@ Cobre's.
 - A rank that panics during `novomodelo run` under MPI aborts the whole job
   with exit code 101. The other ranks used to wait in a collective until the
   job was killed.
+- Under MPI, training multiplied its LP-solve count by the number of ranks, and
+  the first-try/retried/failed split and the forward solve seconds with it. The
+  training summary and `solve_stats` in `training/metadata.json` now report the
+  same counts for any rank count, and the split adds up to the total.
 
 ### Removed
 
