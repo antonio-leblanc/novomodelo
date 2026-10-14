@@ -146,6 +146,11 @@ fn spawn_run(
         }
         None => binary,
     };
+    // A signal can truncate a child's coverage profile mid-write, and one
+    // corrupt profile fails the whole `cargo llvm-cov` merge.
+    if std::env::var_os("LLVM_PROFILE_FILE").is_some() {
+        command.env("LLVM_PROFILE_FILE", out.join("novomodelo-%p.profraw"));
+    }
     let mut child = command
         .args(["--color", "never", "run"])
         .arg(case)
