@@ -5,12 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Novomodelo is a fork of [Cobre](https://github.com/cobre-rs/cobre), and its
-version numbers continue Cobre's: Novomodelo 0.18.0 is Cobre 0.18.0 under the
-new name. Cobre's release history up to the fork point follows under
-"Cobre history" as Cobre published it, so its names, commands and links are
-Cobre's.
-
 <!-- next-header -->
 
 ## [Unreleased]
@@ -18,70 +12,45 @@ Cobre's.
 ### Changed
 
 - **BREAKING:** the default of `modeling.inflow_non_negativity.method` is now
-  `truncation_with_penalty` (was `penalty`). Studies that omit the method change
-  behaviour; set `"penalty"` explicitly to keep the previous default.
+  `truncation_with_penalty` (was `penalty`). Set `"penalty"` to keep the old
+  default.
 - **BREAKING:** `truncation` and `truncation_with_penalty` follow Larroyd et al.
-  (2022). The PAR inflow stays raw: it is the incremental inflow and the next
-  stage's lag, and it may be negative. A per-hydro correction lifts the local
-  inflow to zero: under `truncation` it is fixed at `max(−r, 0)` at no cost; under
-  `truncation_with_penalty` it lies between 0 and `max(−r, 0)` and is priced by
-  `penalties.json → hydro.inflow_nonnegativity_cost`. Before, the noise was raised
-  until the inflow was non-negative, and `truncation_with_penalty` also added a
-  priced correction with no upper bound. Results of studies whose inflow draws go
-  negative change. `incremental_inflow_m3s` reports the raw value and
-  `inflow_nonnegativity_slack_m3s` the correction. Policies trained with either
-  method before this change describe the old model; retrain them. Under either
-  truncation method the lower bound is not guaranteed to stay below the upper
-  bound, and the `gap` stopping rule can then report convergence that has not
-  occurred (the paper's §2.5).
-- **BREAKING:** `novomodelo_sddp::InflowNonNegativityMethod::has_slack_columns()`
-  now also returns true for `Truncation`, whose LP gains one correction column per
-  hydro. A stored basis from an earlier `truncation` run no longer fits the LP and
-  is not used (the solve starts cold).
+  (2022). The PAR inflow is no longer raised to zero: it stays raw, may be
+  negative, and carries into the next stage's lag. A per-hydro correction lifts
+  the inflow that enters the water balance to zero. Under `truncation` it equals
+  the shortfall and costs nothing; under `truncation_with_penalty` it lies
+  between zero and the shortfall and is priced by
+  `hydro.inflow_nonnegativity_cost` in `penalties.json`.
+  `incremental_inflow_m3s` reports the raw inflow and
+  `inflow_nonnegativity_slack_m3s` the correction. Results change for studies
+  whose inflow draws go negative. Under either method the lower bound can exceed
+  the upper bound, so a `gap` stopping rule can report convergence too early.
 - Under `penalty` and `truncation_with_penalty`, the inflow slack of a plant
-  before filling now enters the water balance of the plant that receives its
-  inflow; before, it entered no balance.
-- Under the truncation methods, a generic constraint's `hydro_inflow` term counts
-  the correction with the inflow, so it reads the water that enters the balance.
-  Under `penalty` the slack stays excluded.
-- HiGHS forward and simulation solves are cold by default: `use_warm_start`
-  now defaults to `false` for those phases, so their LPs ignore the stored
-  basis and run presolve. Backward solves still warm-start. Set
-  `"use_warm_start": true` in `training.solver.forward` or `simulation.solver`
-  to restore warm-starting for that phase. A cold solve can stop at a
-  different but equally optimal vertex, so simulated duals and the final
-  lower bound may differ slightly from 0.18.0 on the same inputs.
-- HiGHS retry escalation keeps the phase's `use_warm_start` at every retry
-  level; levels 5-11 previously reset it to the solver default.
-- `novomodelo run` writes its banner, progress lines and summaries to stdout;
-  warnings and errors stay on stderr, and progress bars on an interactive
-  terminal still draw on stderr. Scripts and job logs that read the run report
-  from stderr must read stdout instead. `--color` now applies to both streams.
-- The training gap in the progress lines and the training summary is printed
-  with 5 decimals instead of 1, so small gaps no longer round to `0.0%`.
+  that has not started filling enters the water balance of the plant that
+  receives its inflow; it used to enter none.
+- Under the truncation methods, a generic constraint's `hydro_inflow` term
+  includes the correction, so it matches the inflow in the water balance.
+- HiGHS forward and simulation solves start cold by default; backward solves
+  still warm-start. Set `"use_warm_start": true` in `training.solver.forward` or
+  `simulation.solver` to warm-start that phase. Retries keep the phase's
+  setting. A cold solve can stop at a different, equally optimal vertex, so
+  simulated duals and the final lower bound may differ slightly from 0.18.0.
+- `novomodelo run` writes its report (banner, progress and summaries) to stdout;
+  warnings and errors stay on stderr. Scripts and job logs that read the report
+  from stderr must read stdout. `--color` applies to both streams.
+- The training gap is printed with 5 decimals instead of 1.
 
 ### Fixed
 
-- `truncation` no longer reaches an infeasible LP when the inflow's standard
+- `truncation` no longer produces an infeasible LP when an inflow's standard
   deviation is zero.
-- `novomodelo run` under MPI no longer panics when the forward passes do not
-  divide evenly across ranks. A rank holding fewer passes than another could
-  index its stored warm-start bases out of bounds, and the job then hung. Such
-  a run now writes the same outputs as a single-process run.
-- A rank that panics during `novomodelo run` under MPI aborts the whole job
-  with exit code 101. The other ranks used to wait in a collective until the
-  job was killed.
-- Under MPI, training multiplied its LP-solve count by the number of ranks, and
-  the first-try/retried/failed split and the forward solve seconds with it. The
-  training summary and `solve_stats` in `training/metadata.json` now report the
-  same counts for any rank count, and the split adds up to the total.
-
-### Removed
-
-- **BREAKING:** `novomodelo_stochastic::solve_par_noise_batch` and its deprecated alias
-  `solve_par_noises`. Call `solve_par_noise` per series with
-  `PrecomputedPar::deterministic_base`, `psi_slice` and `sigma` instead;
-  `evaluate_par_batch` is unchanged.
+- `novomodelo run` under MPI no longer panics and hangs when the forward passes
+  do not divide evenly across ranks.
+- A rank that panics under MPI aborts the whole job with exit code 101, instead
+  of leaving the other ranks waiting until the job is killed.
+- Under MPI, the training summary and `solve_stats` in `training/metadata.json`
+  no longer multiply the LP-solve counts and the forward solve time by the
+  number of ranks.
 
 ## [0.18.0] - 2026-10-07
 
