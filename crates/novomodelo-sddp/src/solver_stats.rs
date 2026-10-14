@@ -313,10 +313,12 @@ pub enum StatsFoldMode {
     AllEntries,
     /// One rank of a multi-rank fold whose result is `allreduce(Sum)`'d by the
     /// caller. `"backward"` entries are allgatherv-replicated and stamped with
-    /// their originating rank, so each rank keeps only its own; `"forward"` and
-    /// `"lower_bound"` entries are already cross-rank `allreduce(Sum)` totals
-    /// duplicated on every rank, so only `rank == 0` keeps them — otherwise the
-    /// caller's `allreduce(Sum)` would multiply them by world_size.
+    /// their originating rank, so each rank keeps only its own. `"forward"`
+    /// entries are already cross-rank `allreduce(Sum)` totals duplicated on
+    /// every rank, and the lower bound is solved on rank 0 alone, so only
+    /// `rank == 0` keeps `"forward"` and `"lower_bound"` entries — otherwise the
+    /// caller's `allreduce(Sum)` would multiply the forward stats by
+    /// `world_size`.
     MpiRank {
         /// This process's MPI rank.
         rank: u32,
@@ -1209,7 +1211,7 @@ mod tests {
                 },
             ),
         ];
-        let (st_ft, st_rt, st_fl, ..) =
+        let (first_try, retried, failed, ..) =
             aggregate_solver_stats_log(&single, StatsFoldMode::MpiRank { rank: 0 });
 
         let backward_entries = || {
@@ -1260,7 +1262,12 @@ mod tests {
                     -1,
                     rank,
                     -1,
-                    global_lb.clone(),
+                    // The lower bound is solved on rank 0 alone.
+                    if rank == 0 {
+                        global_lb.clone()
+                    } else {
+                        SolverStatsDelta::default()
+                    },
                 ),
             ];
             log.extend(backward_entries());
@@ -1268,19 +1275,11 @@ mod tests {
         };
         let r0 = aggregate_solver_stats_log(&rank_log(0), StatsFoldMode::MpiRank { rank: 0 });
         let r1 = aggregate_solver_stats_log(&rank_log(1), StatsFoldMode::MpiRank { rank: 1 });
-        let two_ft = r0.0 + r1.0;
-        let two_rt = r0.1 + r1.1;
-        let two_fl = r0.2 + r1.2;
 
-        // first-try: forward 100 + lb 20 + backward 30 = 150, on both shapes.
-        assert_eq!(st_ft, 150);
-        assert_eq!(two_ft, 150);
-        // retried: forward 10 + lb 0 + backward 6 = 16.
-        assert_eq!(st_rt, 16);
-        assert_eq!(two_rt, 16);
-        // failed: forward 1.
-        assert_eq!(st_fl, 1);
-        assert_eq!(two_fl, 1);
+        // first-try: forward 100 + lb 20 + backward 30 = 150; retried: forward
+        // 10 + backward 6 = 16; failed: forward 1 — on both shapes.
+        assert_eq!((first_try, retried, failed), (150, 16, 1));
+        assert_eq!((r0.0 + r1.0, r0.1 + r1.1, r0.2 + r1.2), (150, 16, 1));
     }
 
     #[test]
