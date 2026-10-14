@@ -1618,14 +1618,16 @@ mod water_balance_closure {
     const LOAD_MW: f64 = 400.0;
     const INITIAL_STORAGE_HM3: f64 = 600.0;
     /// Under `penalty` the 600 hm³ run prices stage-0 water at exactly the penalty
-    /// slack's own price (stage 1 can buy unbounded slack at `c_inf`), so the solve
-    /// takes no stage-0 correction; with 200 hm³ stage 0 is short of water itself.
+    /// slack's own price (stage 1 can buy unbounded slack at `c_inf`), so taking the
+    /// correction at stage 0 or at stage 1 is a tie; only the warm-started
+    /// simulation takes it at stage 1, which the chronological vacuity guard needs.
+    /// With 200 hm³ stage 0 is short of water itself.
     const PENALTY_SHORT_INITIAL_STORAGE_HM3: f64 = 200.0;
-    /// Warm start at its default, and off. The CLP backend refuses
-    /// `simulation.solver.use_warm_start` at setup, so the "off" setting runs on
-    /// `HiGHS` only.
+    /// Warm start on and off, spelled out because the `HiGHS` simulation default is
+    /// cold. The CLP backend refuses `simulation.solver.use_warm_start` at setup and
+    /// always reuses an offered basis, so it runs its default only.
     #[cfg(feature = "highs")]
-    const WARM_START_SETTINGS: &[Option<bool>] = &[None, Some(false)];
+    const WARM_START_SETTINGS: &[Option<bool>] = &[Some(true), Some(false)];
     #[cfg(not(feature = "highs"))]
     const WARM_START_SETTINGS: &[Option<bool>] = &[None];
 
@@ -1820,8 +1822,8 @@ mod water_balance_closure {
     }
 
     /// Every simulated water balance closes from the written `simulation/hydros`
-    /// rows, under every method and with warm start on (default) and, on `HiGHS`,
-    /// off, at one tolerance.
+    /// rows, under every method and with warm start on and, on `HiGHS`, off, at
+    /// one tolerance.
     #[test]
     fn simulated_water_balance_closes_from_outputs() {
         let mut table: Vec<String> = Vec::new();
