@@ -107,7 +107,7 @@ fn fmt_avg_lp_time(total_ms: f64, count: u64) -> String {
 pub enum RenderMode {
     /// Live-redrawn [`indicatif`] bars. Correct when stderr is a TTY.
     Interactive,
-    /// Plain append-only log lines. Correct for pipes, files, or
+    /// Plain append-only log lines on stdout. Correct for pipes, files, or
     /// `mpirun` aggregators, where ANSI cursor escapes cannot be
     /// interpreted live and would appear as duplicated output otherwise.
     Log,

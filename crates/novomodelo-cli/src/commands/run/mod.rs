@@ -108,7 +108,7 @@ pub(super) struct RunContext<C: Communicator> {
     pub(super) stdout: Term,
     /// Warnings and `CliError` reporting.
     pub(super) stderr: Term,
-    /// Progress strategy: non-TTY stderr gets append-only lines, not bars.
+    /// Progress strategy: bars on a TTY stderr, append-only stdout lines otherwise.
     pub(super) render_mode: RenderMode,
     pub(super) topology: ExecutionTopology,
     pub(super) solver_version: String,
