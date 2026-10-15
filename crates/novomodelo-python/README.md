@@ -89,5 +89,5 @@ Apache-2.0 — see [LICENSE](https://github.com/ons-ccee-epe/novomodelo/blob/mai
 ## Links
 
 - [Repository](https://github.com/ons-ccee-epe/novomodelo)
-- [Documentation](https://docs.novomodelo.invalid/)
+- [Documentation](https://docs.modelossetoreletrico.org.br/)
 - [Bug Tracker](https://github.com/ons-ccee-epe/novomodelo/issues)

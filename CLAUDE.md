@@ -133,7 +133,7 @@ is generated from it:
 | Resource              | Location            | Purpose                                      |
 | --------------------- | ------------------- | -------------------------------------------- |
 | Workspace map         | `ARCHITECTURE.md`   | Crate responsibilities, dependency boundaries, build-time choices |
-| Unified docs site     | `https://docs.novomodelo.invalid/`                     | User-facing documentation (methodology + software) |
+| Unified docs site     | `https://docs.modelossetoreletrico.org.br/`            | User-facing documentation (methodology + software) |
 | Methodology reference | `~/git/novomodelo-docs/` | Specs, theory, math                          |
 | CHANGELOG             | `CHANGELOG.md`      | Per-release feature list                     |
 | Design docs           | `docs/design/`      | Live specs, decision records & proposals — `docs/design/README.md` is the status index |

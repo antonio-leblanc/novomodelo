@@ -9,7 +9,7 @@ links at the end of each section for the full detail.
 
 For the mathematical/methodology reference (SDDP formulation, cut derivation,
 risk measures, hydro production models) and for user-facing installation and
-CLI usage, see the [unified docs site](https://docs.novomodelo.invalid/).
+CLI usage, see the [unified docs site](https://docs.modelossetoreletrico.org.br/).
 
 ## Crate responsibilities
 
@@ -256,5 +256,5 @@ read as "any graph goes in JSON".
 | Resource          | URL                                                        |
 | ----------------- | ---------------------------------------------------------- |
 | Repository        | <https://github.com/ons-ccee-epe/novomodelo>                        |
-| Unified docs site | <https://docs.novomodelo.invalid/>                               |
+| Unified docs site | <https://docs.modelossetoreletrico.org.br/>                      |
 | CHANGELOG         | <https://github.com/ons-ccee-epe/novomodelo/blob/main/CHANGELOG.md> |

@@ -32,9 +32,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://docs.novomodelo.invalid/"
+Homepage = "https://docs.modelossetoreletrico.org.br/"
 Repository = "https://github.com/ons-ccee-epe/novomodelo"
-Documentation = "https://docs.novomodelo.invalid/"
+Documentation = "https://docs.modelossetoreletrico.org.br/"
 "Bug Tracker" = "https://github.com/ons-ccee-epe/novomodelo/issues"
 
 [tool.maturin]
