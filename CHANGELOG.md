@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Under MPI, the backward `wait` in the training time split and the
+  `bwd_load_imbalance_ms` timing column now include the time a rank spends
+  waiting for the other ranks. Previously they counted only the imbalance
+  between rank 0's own threads, so they understated the wait and did not match
+  a single-rank run with the same total thread count.
+
 ## [0.18.1] - 2026-10-14
 
 ### Changed
