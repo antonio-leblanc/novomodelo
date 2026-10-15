@@ -38,7 +38,7 @@
 #
 #   (The former Check 2 — intra-book relative link resolution — was retired
 #   with book/ (mdBook decommission); the unified docs site at
-#   docs.novomodelo.invalid owns link integrity for user-facing prose now.)
+#   docs.modelossetoreletrico.org.br owns link integrity for user-facing prose now.)
 #
 # Exclusions (MUST NOT be flagged), per §6.4's scope bound:
 #   - Absolute URLs: http://, https://, mailto:, ftp://.

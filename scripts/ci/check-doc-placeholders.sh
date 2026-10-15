@@ -23,7 +23,7 @@
 #   practice novomodelo files follow the tail-block convention.
 #
 #   (The former book-prose pass — every *.md under book/src/ — was retired with
-#   book/ (mdBook decommission); the unified docs site at docs.novomodelo.invalid owns
+#   book/ (mdBook decommission); the unified docs site at docs.modelossetoreletrico.org.br owns
 #   placeholder hygiene for user-facing prose now.)
 #
 # Flagged patterns:

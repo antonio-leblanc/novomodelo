@@ -121,11 +121,11 @@ novomodelo run my_study --output my_study/results
 
 ## Links
 
-| Resource             | URL                                                         |
-| -------------------- | ----------------------------------------------------------- |
-| CLI reference        | <https://docs.novomodelo.invalid/reference/cli-reference/>       |
-| Repository           | <https://github.com/ons-ccee-epe/novomodelo>                         |
-| Changelog            | <https://github.com/ons-ccee-epe/novomodelo/blob/main/CHANGELOG.md>  |
+| Resource      | URL                                                                 |
+| ------------- | ------------------------------------------------------------------- |
+| CLI reference | <https://docs.modelossetoreletrico.org.br/reference/cli-reference/> |
+| Repository    | <https://github.com/ons-ccee-epe/novomodelo>                        |
+| Changelog     | <https://github.com/ons-ccee-epe/novomodelo/blob/main/CHANGELOG.md> |
 
 ## Status
 

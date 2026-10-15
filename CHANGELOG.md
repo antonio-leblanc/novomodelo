@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The `novomodelo-python` package's Homepage and Documentation links, and the
+  documentation links in the READMEs, point at the published documentation
+  site, <https://docs.modelossetoreletrico.org.br/>.
+
 ## [0.18.1] - 2026-10-14
 
 ### Changed

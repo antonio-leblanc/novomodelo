@@ -348,7 +348,7 @@ novomodelo/
 └── docs/                    # Internal project documentation
 ```
 
-The full specification corpus lives in the separate [novomodelo-docs](https://github.com/ons-ccee-epe/novomodelo-docs) repository ([deployed docs](https://docs.novomodelo.invalid/)).
+The full specification corpus lives in the separate [novomodelo-docs](https://github.com/ons-ccee-epe/novomodelo-docs) repository ([deployed docs](https://docs.modelossetoreletrico.org.br/)).
 
 ## How to Contribute
 
@@ -427,23 +427,23 @@ Documentation improvements are always welcome. Novomodelo's documentation is spl
 by audience — each kind of doc has one authoritative home, and the others point
 to it rather than restating it:
 
-| Documentation            | Home                                                                     | Authoritative for                                        |
-| ------------------------ | ------------------------------------------------------------------------ | -------------------------------------------------------- |
-| Rust API reference       | rustdoc (inline in source)                                               | Public types, traits, functions                          |
-| Per-crate reference      | `crates/*/README.md`                                                     | A crate's responsibility and internals                   |
-| Workspace map            | `ARCHITECTURE.md`                                                        | Crate boundaries and the dependency graph                |
-| Contributor guide        | `CONTRIBUTING.md` (this file)                                            | Build, test, and PR workflow                             |
-| User guides & tutorials  | [docs.novomodelo.invalid](https://docs.novomodelo.invalid/)                          | Installation, CLI and Python usage                       |
-| Methodology & theory     | [novomodelo-docs](https://github.com/ons-ccee-epe/novomodelo-docs)                     | SDDP formulation, cut derivation, math specs             |
-| Design specs & decisions | `docs/design/` (`docs/design/README.md` is the status index)             | Shipped-behavior specs, decision records, proposals      |
-| Coding conventions       | `CLAUDE.md`, `.claude/rules/*`                                           | Enforced comment/import/testing/SDDP contracts           |
-| Release history          | `CHANGELOG.md`                                                           | Per-version changes                                      |
-| License & notices        | `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `THIRD_PARTY_NOTICES.md` | Legal obligations (see each file's header for its scope) |
+| Documentation            | Home                                                                          | Authoritative for                                        |
+| ------------------------ | ----------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Rust API reference       | rustdoc (inline in source)                                                    | Public types, traits, functions                          |
+| Per-crate reference      | `crates/*/README.md`                                                          | A crate's responsibility and internals                   |
+| Workspace map            | `ARCHITECTURE.md`                                                             | Crate boundaries and the dependency graph                |
+| Contributor guide        | `CONTRIBUTING.md` (this file)                                                 | Build, test, and PR workflow                             |
+| User guides & tutorials  | [docs.modelossetoreletrico.org.br](https://docs.modelossetoreletrico.org.br/) | Installation, CLI and Python usage                       |
+| Methodology & theory     | [novomodelo-docs](https://github.com/ons-ccee-epe/novomodelo-docs)            | SDDP formulation, cut derivation, math specs             |
+| Design specs & decisions | `docs/design/` (`docs/design/README.md` is the status index)                  | Shipped-behavior specs, decision records, proposals      |
+| Coding conventions       | `CLAUDE.md`, `.claude/rules/*`                                                | Enforced comment/import/testing/SDDP contracts           |
+| Release history          | `CHANGELOG.md`                                                                | Per-version changes                                      |
+| License & notices        | `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`, `THIRD_PARTY_NOTICES.md`      | Legal obligations (see each file's header for its scope) |
 
 The methodology specification corpus lives in the separate
 [novomodelo-docs](https://github.com/ons-ccee-epe/novomodelo-docs) repository; user-facing
 guides and reference pages are published from it at
-[docs.novomodelo.invalid](https://docs.novomodelo.invalid/).
+[docs.modelossetoreletrico.org.br](https://docs.modelossetoreletrico.org.br/).
 
 #### JSON schemas and the novomodelo-docs vendored copy
 
@@ -558,7 +558,7 @@ If you're a **power systems engineer** new to Rust:
 
 If you're a **Rust developer** new to power systems:
 
-- The [docs site](https://docs.novomodelo.invalid/) has algorithm documentation and a user guide
+- The [docs site](https://docs.modelossetoreletrico.org.br/) has algorithm documentation and a user guide
 - Ask questions in [Discussions](https://github.com/ons-ccee-epe/novomodelo/discussions) — no question is too basic
 
 If you're a **researcher** with algorithmic improvements:

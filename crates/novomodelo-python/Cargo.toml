@@ -6,7 +6,7 @@ edition = "2024"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/ons-ccee-epe/novomodelo"
-homepage = "https://docs.novomodelo.invalid/"
+homepage = "https://docs.modelossetoreletrico.org.br/"
 authors = [
     "Operador Nacional do Sistema Elétrico - ONS",
     "Câmara de Comercialização de Energia Elétrica - CCEE",

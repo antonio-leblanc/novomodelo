@@ -88,11 +88,10 @@ keep = true
 pattern = 'cobre-rs/slurm-mpich-base'
 to = 'ons-ccee-epe/slurm-mpich-base'
 
-# A placeholder until the fork's documentation domain exists; one substitution
-# of this host replaces it.
+# Cobre's documentation host maps to the fork's published documentation domain.
 [[rule]]
 pattern = 'docs\.cobre-rs\.dev'
-to = 'docs.novomodelo.invalid'
+to = 'docs.modelossetoreletrico.org.br'
 
 [[rule]]
 pattern = '''cobre-(icon|logo)[A-Za-z0-9_-]*\.svg'''
