@@ -244,7 +244,9 @@ pub(super) fn check_season_observation_coverage(
 
     let mut season_obs_count: HashMap<usize, usize> = HashMap::new();
     for row in &data.inflow_history {
-        if let Some(sid) = season_id_for_date(&stage_index, row.start_date) {
+        if let Some(sid) = season_id_for_date(&stage_index, row.start_date)
+            .or_else(|| season_map.season_for_date(row.start_date))
+        {
             *season_obs_count.entry(sid).or_insert(0) += 1;
         }
     }
@@ -1202,6 +1204,44 @@ mod tests {
         assert!(
             rule28_warnings.is_empty(),
             "External inflow scheme should suppress rule-28 warnings; \
+             got: {rule28_warnings:?}"
+        );
+    }
+
+    /// Given a monthly study starting in January 2000 and an inflow history
+    /// that ends before it (1990-1999, the usual shape of a real case), no
+    /// warning is emitted by rule 28: PAR estimation resolves those
+    /// observations through the season map, so rule 28 must as well.
+    #[test]
+    fn test_observation_coverage_history_before_study_start() {
+        let stages = make_stages_with_seasons(36, /*with_season_map=*/ true);
+        let history: Vec<_> = (0..120usize)
+            .map(|i| {
+                let year = 1990 + (i / 12) as i32;
+                let month = (i % 12) as u32 + 1;
+                history_row(
+                    EntityId::from(1),
+                    chrono::NaiveDate::from_ymd_opt(year, month, 1).unwrap(),
+                    100.0,
+                )
+            })
+            .collect();
+        let data = make_data_estimation(vec![make_hydro(1, None)], stages, history);
+
+        let mut ctx = ValidationContext::new();
+        check_season_id_consistency(&data, &mut ctx);
+
+        let rule28_warnings: Vec<_> = ctx
+            .warnings()
+            .into_iter()
+            .filter(|w| {
+                w.kind == ErrorKind::ModelQuality
+                    && w.message.contains("has no inflow observations")
+            })
+            .collect();
+        assert!(
+            rule28_warnings.is_empty(),
+            "history predating the study must count toward season coverage; \
              got: {rule28_warnings:?}"
         );
     }
